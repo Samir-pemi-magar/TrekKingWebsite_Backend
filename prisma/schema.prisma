@@ -1,0 +1,388 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// USER
+// ─────────────────────────────────────────────────────────────────────────
+// - USER: regular customer. passwordHash is nullable because guest inquiries
+//   and guest bookings don't require an account.
+// - ORGANIZER: owns/manages Trips (organizerId) and publishes Posts.
+// - GUIDE: field staff who can be assigned to a TripDeparture. Does not own
+//   trips, but can be linked to one or more departures.
+// - ADMIN: full control — all trips, all users, all posts/bookings, can
+//   promote/demote roles.
+model User {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  passwordHash String?
+  name         String?
+  phone        String?
+  bio          String?
+  nationality  String?
+  avatarUrl    String?
+  avatarPublicId String?
+  role         Role      @default(USER)
+  isActive     Boolean   @default(true) // soft-disable instead of hard delete
+  deletedAt    DateTime? // soft delete marker
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  trips            Trip[]          @relation("OrganizerTrips")
+  posts             Post[]          @relation("AuthoredPosts")
+  bookings          Booking[]       @relation("UserBookings")
+  reviews           Review[]
+  wishlist          Wishlist[]
+  guidedDepartures  TripDeparture[] @relation("AssignedGuide")
+  refreshTokens     RefreshToken[]
+  auditLogs         AuditLog[]      @relation("ActorLogs")
+
+  passwordResetTokens PasswordResetToken[]
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+enum Role {
+  USER
+  ORGANIZER
+  GUIDE
+  ADMIN
+}
+
+// Opaque refresh tokens, stored hashed. Supports rotation + revocation so a
+// stolen/compromised token (or a "log out everywhere") can be invalidated
+// without touching short-lived access tokens.
+model RefreshToken {
+  id           String    @id @default(uuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash    String    @unique
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  replacedBy   String? // tokenHash of the token that rotated this one out
+  createdAt    DateTime  @default(now())
+
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// TRIP
+// ─────────────────────────────────────────────────────────────────────────
+// type = FIXED_DEPARTURE  -> "already planned, join if you want" (has TripDeparture rows)
+// type = AVAILABLE        -> flexible / bookable anytime, no fixed group date
+// A "custom, build your own trek" request does NOT create a Trip row at all —
+// it's just an Inquiry with tripId = null.
+model Trip {
+  id            String     @id @default(uuid())
+  name          String
+  region        Region
+  location      String?
+  duration      Int
+  difficulty    Difficulty
+  price         Int
+  description   String
+  type          TripType   @default(AVAILABLE)
+  bestSeason    String?
+  maxAltitudeM  Int?
+
+  highlights    String[]   @default([])
+  includes      String[]   @default([])
+  excludes      String[]   @default([])
+
+  coverImageUrl      String?
+  coverImagePublicId String?
+
+  deletedAt     DateTime? // soft delete — keeps historical bookings/reviews intact
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  photos        TripPhoto[]
+  videos        TripVideo[]
+  itinerary     ItineraryDay[]
+  departures    TripDeparture[]
+  inquiries     Inquiry[]
+  posts         Post[]
+  bookings      Booking[]
+  reviews       Review[]
+  wishlistedBy  Wishlist[]
+
+  organizerId String?
+  organizer   User?      @relation("OrganizerTrips", fields: [organizerId], references: [id], onDelete: SetNull)
+}
+
+enum TripType {
+  FIXED_DEPARTURE
+  AVAILABLE
+}
+
+// Day-by-day plan shown on a trip's detail page.
+model ItineraryDay {
+  id           String   @id @default(uuid())
+  tripId       String
+  trip         Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  dayNumber    Int
+  title        String
+  description  String
+  meals        String? // e.g. "Breakfast, Lunch, Dinner"
+  accommodation String? // e.g. "Teahouse", "Hotel"
+  altitudeM    Int?
+  distanceKm   Float?
+
+  @@unique([tripId, dayNumber])
+}
+
+// A planned trip can run more than once. maxSeats + bookings' traveler counts
+// let us compute remaining capacity; guideId lets a specific field guide be
+// assigned to a specific departure.
+model TripDeparture {
+  id        String    @id @default(uuid())
+  tripId    String
+  trip      Trip      @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  startDate DateTime
+  endDate   DateTime?
+  note      String?
+  maxSeats  Int?
+
+  guideId   String?
+  guide     User?     @relation("AssignedGuide", fields: [guideId], references: [id], onDelete: SetNull)
+
+  bookings  Booking[]
+  createdAt DateTime  @default(now())
+}
+
+model TripPhoto {
+  id        String   @id @default(uuid())
+  tripId    String
+  trip      Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  url       String
+  publicId  String?
+  caption   String?
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+}
+
+model TripVideo {
+  id           String   @id @default(uuid())
+  tripId       String
+  trip         Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  url          String
+  publicId     String?
+  thumbnailUrl String?
+  caption      String?
+  order        Int      @default(0)
+  createdAt    DateTime @default(now())
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// BOOKING — replaces "just an inquiry" as the real commercial record.
+// Supports both logged-in users and guest checkouts (guestName/Email/Phone).
+// Payment gateway integration (eSewa/Khalti/Stripe) can populate
+// paymentMethod/paymentStatus/amountPaid via a webhook later; for now these
+// are settable by an Organizer/Admin (e.g. after a bank transfer or cash
+// payment is confirmed).
+// ─────────────────────────────────────────────────────────────────────────
+model Booking {
+  id            String        @id @default(uuid())
+  tripId        String
+  trip          Trip          @relation(fields: [tripId], references: [id])
+  departureId   String?
+  departure     TripDeparture? @relation(fields: [departureId], references: [id])
+
+  userId        String?
+  user          User?         @relation("UserBookings", fields: [userId], references: [id])
+  guestName     String?
+  guestEmail    String?
+  guestPhone    String?
+
+  travelers     Int           @default(1)
+  totalPrice    Int
+  status        BookingStatus @default(PENDING)
+  paymentStatus PaymentStatus @default(UNPAID)
+  paymentMethod PaymentMethod?
+  amountPaid    Int           @default(0)
+  notes         String?
+
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+}
+
+enum PaymentStatus {
+  UNPAID
+  PARTIAL
+  PAID
+  REFUNDED
+}
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  ESEWA
+  KHALTI
+  STRIPE
+  OTHER
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// POST  (social-media style feed)
+// ─────────────────────────────────────────────────────────────────────────
+model Post {
+  id        String   @id @default(uuid())
+  authorId  String
+  author    User     @relation("AuthoredPosts", fields: [authorId], references: [id], onDelete: Cascade)
+  caption   String
+  tripId    String?
+  trip      Trip?    @relation(fields: [tripId], references: [id], onDelete: SetNull)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  photos PostPhoto[]
+  videos PostVideo[]
+}
+
+model PostPhoto {
+  id       String  @id @default(uuid())
+  postId   String
+  post     Post    @relation(fields: [postId], references: [id], onDelete: Cascade)
+  url      String
+  publicId String?
+  order    Int     @default(0)
+}
+
+model PostVideo {
+  id           String  @id @default(uuid())
+  postId       String
+  post         Post    @relation(fields: [postId], references: [id], onDelete: Cascade)
+  url          String
+  publicId     String?
+  thumbnailUrl String?
+  order        Int     @default(0)
+}
+
+model Inquiry {
+  id             String   @id @default(uuid())
+  name           String
+  email          String
+  regionInterest Region?
+  message        String
+  tripId         String?
+  createdAt      DateTime @default(now())
+  trip           Trip?    @relation(fields: [tripId], references: [id])
+}
+
+// Admin-curated marketing quotes for the homepage. Kept separate from the
+// real customer Review system below — this is copywriting, not verified
+// customer feedback.
+model Testimonial {
+  id        String   @id @default(uuid())
+  name      String
+  country   String
+  tripName  String
+  quote     String
+  createdAt DateTime @default(now())
+}
+
+// Real customer reviews, tied to an account and (optionally) a completed
+// booking. isVerified is set automatically when the reviewer has a
+// COMPLETED booking for that trip.
+model Review {
+  id         String   @id @default(uuid())
+  tripId     String
+  trip       Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rating     Int // 1-5
+  comment    String
+  isVerified Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@unique([tripId, userId])
+}
+
+model Wishlist {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tripId    String
+  trip      Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, tripId])
+}
+
+// Lightweight audit trail for admin-visible actions (role changes, deletes,
+// booking status changes). Not exhaustive — meant for accountability across
+// a multi-organizer team, not full change-data-capture.
+model AuditLog {
+  id         String   @id @default(uuid())
+  actorId    String?
+  actor      User?    @relation("ActorLogs", fields: [actorId], references: [id], onDelete: SetNull)
+  action     String
+  entityType String
+  entityId   String
+  meta       Json?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+}
+
+enum Region {
+  HIMALAYA
+  HILLS
+  TERAI
+}
+
+enum Difficulty {
+  EASY
+  MODERATE
+  STRENUOUS
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// SITE CONTENT — admin-editable Homepage hero image + About page
+// (hero image + copy). Singleton: there is only ever exactly one row, so
+// its id is a fixed literal instead of @default(uuid()) — nothing ever
+// looks it up by a generated id.
+// ─────────────────────────────────────────────────────────────────────────
+model SiteContent {
+  id                String   @id @default("singleton")
+
+  // Homepage hero
+  homeHeroImageUrl  String?
+  homeHeroPublicId  String?  // Cloudinary public_id, so we can delete the old image on replace
+
+  // About page hero
+  aboutHeroImageUrl String?
+  aboutHeroPublicId String?
+
+  // About page copy — all optional so the page falls back to its current
+  // hardcoded defaults until an admin first edits them.
+  aboutIntro        String?  // the bold intro line
+  aboutBody         String?  // the paragraph(s) below it
+  aboutFeatures     Json?    // [{ title: string; description: string }]
+  aboutClosing      String?  // the closing "office in Thamel..." paragraph
+
+  updatedAt         DateTime @updatedAt
+}

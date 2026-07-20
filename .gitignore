@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Environment variables (secrets — DB URL, JWT secrets, Cloudinary keys, SMTP creds)
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS/editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Prisma (keep migrations, ignore generated client if you generate to a custom path)
+# node_modules/.prisma is already covered by node_modules/ above
+
+# Optional: if you use a local sqlite db for testing
+*.sqlite

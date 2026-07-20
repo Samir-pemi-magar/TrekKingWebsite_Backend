@@ -1,0 +1,218 @@
+import { Prisma, Difficulty, Region, TripType } from "@prisma/client";
+import { prisma } from "../config/prisma.js";
+
+export interface TripFilters {
+  region?: Region;
+  difficulty?: Difficulty;
+  type?: TripType;
+  minPrice?: number;
+  maxPrice?: number;
+  page?: number;
+  pageSize?: number;
+  organizerId?: string;
+  search?: string;
+}
+
+const tripInclude = {
+  photos: { orderBy: { order: "asc" } },
+  videos: { orderBy: { order: "asc" } },
+  itinerary: { orderBy: { dayNumber: "asc" } },
+  departures: {
+    orderBy: { startDate: "asc" },
+    include: {
+      guide: { select: { id: true, name: true, avatarUrl: true, phone: true } },
+      _count: { select: { bookings: true } },
+    },
+  },
+  organizer: { select: { id: true, name: true, email: true, avatarUrl: true, bio: true } },
+  _count: { select: { reviews: true } },
+} satisfies Prisma.TripInclude;
+
+export async function listTrips(filters: TripFilters) {
+  const page = filters.page ?? 1;
+  const pageSize = filters.pageSize ?? 20;
+
+  const where: Prisma.TripWhereInput = {
+    deletedAt: null,
+    ...(filters.region ? { region: filters.region } : {}),
+    ...(filters.difficulty ? { difficulty: filters.difficulty } : {}),
+    ...(filters.type ? { type: filters.type } : {}),
+    ...(filters.organizerId ? { organizerId: filters.organizerId } : {}),
+    ...(filters.minPrice !== undefined || filters.maxPrice !== undefined
+      ? { price: { gte: filters.minPrice, lte: filters.maxPrice } }
+      : {}),
+    ...(filters.search
+      ? {
+          OR: [
+            { name: { contains: filters.search, mode: "insensitive" } },
+            { description: { contains: filters.search, mode: "insensitive" } },
+            { location: { contains: filters.search, mode: "insensitive" } },
+          ],
+        }
+      : {}),
+  };
+
+  const [items, total] = await Promise.all([
+    prisma.trip.findMany({
+      where,
+      include: tripInclude,
+      orderBy: { createdAt: "desc" },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+    prisma.trip.count({ where }),
+  ]);
+
+  // Rating average is computed separately (avg() doesn't come free with findMany).
+  const ratings = await prisma.review.groupBy({
+    by: ["tripId"],
+    where: { tripId: { in: items.map((t) => t.id) } },
+    _avg: { rating: true },
+  });
+  const ratingByTrip = new Map(ratings.map((r) => [r.tripId, r._avg.rating]));
+
+  return {
+    items: items.map((t) => ({ ...t, averageRating: ratingByTrip.get(t.id) ?? null })),
+    total,
+    page,
+    pageSize,
+    totalPages: Math.ceil(total / pageSize),
+  };
+}
+
+export function getTripById(id: string) {
+  return prisma.trip.findFirst({ where: { id, deletedAt: null }, include: tripInclude });
+}
+
+export interface TripCreateInput {
+  name: string;
+  region: Region;
+  location?: string;
+  duration: number;
+  difficulty: Difficulty;
+  price: number;
+  description: string;
+  type?: TripType;
+  bestSeason?: string;
+  maxAltitudeM?: number;
+  highlights?: string[];
+  includes?: string[];
+  excludes?: string[];
+  organizerId?: string | null;
+  coverImageUrl?: string;
+  coverImagePublicId?: string;
+}
+
+export function createTrip(data: TripCreateInput) {
+  return prisma.trip.create({ data, include: tripInclude });
+}
+
+export function updateTrip(id: string, data: Partial<TripCreateInput>) {
+  return prisma.trip.update({ where: { id }, data, include: tripInclude });
+}
+
+// Soft delete — trips can have real financial history (bookings, reviews)
+// attached, so we never hard-delete them.
+export function deleteTrip(id: string) {
+  return prisma.trip.update({ where: { id }, data: { deletedAt: new Date() } });
+}
+
+// ── Gallery photos ──────────────────────────────────────────────────────
+export function addTripPhotos(tripId: string, photos: { url: string; publicId: string; order: number }[]) {
+  return prisma.tripPhoto.createMany({ data: photos.map((p) => ({ ...p, tripId })) });
+}
+
+export function getTripPhotoById(id: string) {
+  return prisma.tripPhoto.findUnique({ where: { id } });
+}
+
+export function deleteTripPhoto(id: string) {
+  return prisma.tripPhoto.delete({ where: { id } });
+}
+
+// ── Gallery videos ──────────────────────────────────────────────────────
+export function addTripVideos(
+  tripId: string,
+  videos: { url: string; publicId: string; thumbnailUrl?: string; order: number }[]
+) {
+  return prisma.tripVideo.createMany({ data: videos.map((v) => ({ ...v, tripId })) });
+}
+
+export function getTripVideoById(id: string) {
+  return prisma.tripVideo.findUnique({ where: { id } });
+}
+
+export function deleteTripVideo(id: string) {
+  return prisma.tripVideo.delete({ where: { id } });
+}
+
+// ── Itinerary days ──────────────────────────────────────────────────────
+export interface ItineraryDayInput {
+  dayNumber: number;
+  title: string;
+  description: string;
+  meals?: string;
+  accommodation?: string;
+  altitudeM?: number;
+  distanceKm?: number;
+}
+
+export function addItineraryDay(tripId: string, data: ItineraryDayInput) {
+  return prisma.itineraryDay.create({ data: { ...data, tripId } });
+}
+
+export function getItineraryDayById(id: string) {
+  return prisma.itineraryDay.findUnique({ where: { id } });
+}
+
+export function updateItineraryDay(id: string, data: Partial<ItineraryDayInput>) {
+  return prisma.itineraryDay.update({ where: { id }, data });
+}
+
+export function deleteItineraryDay(id: string) {
+  return prisma.itineraryDay.delete({ where: { id } });
+}
+
+// ── Departures + guide assignment ───────────────────────────────────────
+export interface DepartureInput {
+  startDate: Date;
+  endDate?: Date;
+  note?: string;
+  maxSeats?: number;
+  guideId?: string | null;
+}
+
+export function addTripDeparture(tripId: string, data: DepartureInput) {
+  return prisma.tripDeparture.create({ data: { ...data, tripId } });
+}
+
+export function getTripDepartureById(id: string) {
+  return prisma.tripDeparture.findUnique({
+    where: { id },
+    include: { _count: { select: { bookings: true } } },
+  });
+}
+
+export function updateTripDeparture(id: string, data: Partial<DepartureInput>) {
+  return prisma.tripDeparture.update({ where: { id }, data });
+}
+
+export function deleteTripDeparture(id: string) {
+  return prisma.tripDeparture.delete({ where: { id } });
+}
+
+export function assignGuideToDeparture(departureId: string, guideId: string | null) {
+  return prisma.tripDeparture.update({ where: { id: departureId }, data: { guideId } });
+}
+
+// Seats remaining = maxSeats - sum(travelers) across active (non-cancelled) bookings.
+export async function getDepartureSeatsRemaining(departureId: string): Promise<number | null> {
+  const departure = await prisma.tripDeparture.findUnique({ where: { id: departureId } });
+  if (!departure || departure.maxSeats == null) return null;
+
+  const booked = await prisma.booking.aggregate({
+    where: { departureId, status: { not: "CANCELLED" } },
+    _sum: { travelers: true },
+  });
+  return departure.maxSeats - (booked._sum.travelers ?? 0);
+}
