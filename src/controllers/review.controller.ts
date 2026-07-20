@@ -12,11 +12,32 @@ const reviewBodySchema = z.object({
   comment: z.string().min(1).max(1000),
 });
 
+const reviewUpdateBodySchema = z
+  .object({
+    rating: z.coerce.number().int().min(1).max(5).optional(),
+    comment: z.string().min(1).max(1000).optional(),
+  })
+  .refine((data) => data.rating !== undefined || data.comment !== undefined, {
+    message: "Provide at least a rating or a comment to update",
+  });
+
 // Public — shown on a trip's detail page.
 export async function getTripReviews(req: Request, res: Response, next: NextFunction) {
   try {
     const tripId = requireStringParam(req.params.tripId);
     const reviews = await ReviewModel.listReviewsForTrip(tripId);
+    res.json({ status: "success", data: reviews });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Auth required — the current user's own reviews, across all trips. Powers
+// the "My Reviews" tab on the account page.
+export async function getMyReviews(req: Request, res: Response, next: NextFunction) {
+  try {
+    if (!req.user) throw ApiError.unauthorized();
+    const reviews = await ReviewModel.listReviewsByUser(req.user.userId);
     res.json({ status: "success", data: reviews });
   } catch (err) {
     next(err);
@@ -49,6 +70,29 @@ export async function createReview(req: Request, res: Response, next: NextFuncti
     });
 
     res.status(201).json({ status: "success", data: review });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Author or Admin only.
+export async function updateReview(req: Request, res: Response, next: NextFunction) {
+  try {
+    if (!req.user) throw ApiError.unauthorized();
+    const id = requireStringParam(req.params.id);
+
+    const existing = await ReviewModel.getReviewById(id);
+    if (!existing) throw ApiError.notFound("Review not found");
+
+    const isAuthor = existing.userId === req.user.userId;
+    if (!isAuthor && req.user.role !== Role.ADMIN) {
+      throw ApiError.forbidden("You can only edit your own review");
+    }
+
+    const data = reviewUpdateBodySchema.parse(req.body);
+    const review = await ReviewModel.updateReview(id, data);
+
+    res.json({ status: "success", data: review });
   } catch (err) {
     next(err);
   }

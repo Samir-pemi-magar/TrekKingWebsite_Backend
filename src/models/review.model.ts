@@ -5,10 +5,26 @@ const reviewInclude = {
   user: { select: { id: true, name: true, avatarUrl: true, nationality: true } },
 } satisfies Prisma.ReviewInclude;
 
+// Used by listReviewsByUser — the account page needs trip identity/cover
+// image for each review, not the reviewing user (that's the caller).
+const reviewWithTripInclude = {
+  trip: { select: { id: true, name: true, coverImageUrl: true } },
+} satisfies Prisma.ReviewInclude;
+
 export function listReviewsForTrip(tripId: string) {
   return prisma.review.findMany({
     where: { tripId },
     include: reviewInclude,
+    orderBy: { createdAt: "desc" },
+  });
+}
+
+// Reviews written by one user, across all trips — powers the "My Reviews"
+// tab on the account page.
+export function listReviewsByUser(userId: string) {
+  return prisma.review.findMany({
+    where: { userId },
+    include: reviewWithTripInclude,
     orderBy: { createdAt: "desc" },
   });
 }
@@ -31,6 +47,15 @@ export interface ReviewCreateInput {
 
 export function createReview(data: ReviewCreateInput) {
   return prisma.review.create({ data, include: reviewInclude });
+}
+
+export interface ReviewUpdateInput {
+  rating?: number;
+  comment?: string;
+}
+
+export function updateReview(id: string, data: ReviewUpdateInput) {
+  return prisma.review.update({ where: { id }, data, include: reviewInclude });
 }
 
 export function deleteReview(id: string) {
