@@ -1,5 +1,5 @@
 import { NextFunction, Request, Response } from "express";
-import { BookingStatus, PaymentStatus, PaymentMethod, Role } from "@prisma/client";
+import { BookingStatus, PaymentMethod, Role } from "@prisma/client";
 import { z } from "zod";
 import { ApiError } from "../utils/apiError.js";
 import { requireStringParam } from "../utils/params.js";
@@ -22,9 +22,12 @@ const baseBookingSchema = z.object({
 
 const statusUpdateSchema = z.object({
   status: z.nativeEnum(BookingStatus).optional(),
-  paymentStatus: z.nativeEnum(PaymentStatus).optional(),
   paymentMethod: z.nativeEnum(PaymentMethod).optional(),
   amountPaid: z.coerce.number().int().nonnegative().optional(),
+  // Payment status is never accepted directly — it's derived server-side
+  // from amountPaid vs totalPrice. markRefunded is the one deliberate
+  // override, since a refund can't be inferred from the amount alone.
+  markRefunded: z.boolean().optional(),
   notes: z.string().max(1000).optional(),
 });
 
@@ -148,14 +151,21 @@ export async function updateBookingStatus(req: Request, res: Response, next: Nex
     await assertCanManageTripBookings(req, existing.tripId);
 
     const data = statusUpdateSchema.parse(req.body);
-    const updated = await BookingModel.updateBooking(id, data);
+
+    if (data.amountPaid !== undefined && data.amountPaid > existing.totalPrice) {
+      throw ApiError.badRequest(
+        `amountPaid ($${data.amountPaid}) cannot exceed the booking's totalPrice ($${existing.totalPrice})`
+      );
+    }
+
+    const updated = await BookingModel.updateBooking(id, data, existing.totalPrice);
 
     recordAuditLog({
       actorId: req.user?.userId,
       action: "booking.updated",
       entityType: "Booking",
       entityId: id,
-      meta: data,
+      meta: { ...data, derivedPaymentStatus: updated.paymentStatus },
     });
 
     if (data.status) {
@@ -166,6 +176,23 @@ export async function updateBookingStatus(req: Request, res: Response, next: Nex
           contactEmail,
           "Booking status update",
           templates.bookingStatusUpdate(contactName, updated.trip.name, updated.status)
+        );
+      }
+    }
+
+    // Receipt for a manually-recorded payment (wire transfer, cash, etc).
+    // Keyed off the actual increase, not just "amountPaid was sent" — so
+    // this doesn't fire on a no-op save or on a refund (amountPaid staying
+    // flat or dropping while markRefunded is set).
+    const paidNow = updated.amountPaid - existing.amountPaid;
+    if (data.amountPaid !== undefined && paidNow > 0) {
+      const contactEmail = updated.user?.email ?? existing.guestEmail;
+      const contactName = updated.user?.name ?? existing.guestName ?? "there";
+      if (contactEmail) {
+        void sendMail(
+          contactEmail,
+          "Payment received",
+          templates.paymentReceived(contactName, updated.trip.name, paidNow, updated.paymentStatus)
         );
       }
     }

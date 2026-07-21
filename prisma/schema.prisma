@@ -242,6 +242,7 @@ enum PaymentMethod {
   ESEWA
   KHALTI
   STRIPE
+  FONEPAY
   OTHER
 }
 

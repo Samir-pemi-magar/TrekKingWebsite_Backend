@@ -42,6 +42,11 @@ export const templates = {
     <p>Hi ${name},</p>
     <p>Your booking for <strong>${tripName}</strong> is now <strong>${status}</strong>.</p>
   `,
+  paymentReceived: (name: string, tripName: string, amount: number, paymentStatus: string) => `
+    <p>Hi ${name},</p>
+    <p>We've received a payment of <strong>$${amount.toLocaleString()}</strong> for your booking on
+    <strong>${tripName}</strong>. Your booking is now marked <strong>${paymentStatus.toLowerCase()}</strong>.</p>
+  `,
   passwordReset: (name: string, resetLink: string) => `
     <p>Hi ${name},</p>
     <p>We received a request to reset your password. Click the link below to choose a new one:</p>

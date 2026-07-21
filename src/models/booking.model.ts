@@ -58,14 +58,42 @@ export function listAllBookings(filters?: { status?: BookingStatus; organizerId?
 
 export interface BookingUpdateInput {
   status?: BookingStatus;
-  paymentStatus?: PaymentStatus;
   paymentMethod?: PaymentMethod;
   amountPaid?: number;
+  // The only manual override left for payment status. A refund isn't a
+  // function of amountPaid alone (money already left the account), so it
+  // can't be derived the same way UNPAID/PARTIAL/PAID can.
+  markRefunded?: boolean;
   notes?: string;
 }
 
-export function updateBooking(id: string, data: BookingUpdateInput) {
-  return prisma.booking.update({ where: { id }, data, include: bookingInclude });
+// Single source of truth for payment status. amountPaid is the only value
+// staff (or a gateway webhook) ever write — this keeps status from ever
+// drifting out of sync with the money, since it's recomputed from the
+// numbers every time instead of being a second field someone can forget.
+export function derivePaymentStatus(amountPaid: number, totalPrice: number): PaymentStatus {
+  if (amountPaid <= 0) return PaymentStatus.UNPAID;
+  if (amountPaid >= totalPrice) return PaymentStatus.PAID;
+  return PaymentStatus.PARTIAL;
+}
+
+// totalPrice is threaded in by the caller (already has it from
+// getBookingById) rather than re-queried here, since it never changes
+// after booking creation.
+export function updateBooking(id: string, data: BookingUpdateInput, totalPrice: number) {
+  const { markRefunded, amountPaid, ...rest } = data;
+  const updateData: Prisma.BookingUpdateInput = { ...rest };
+
+  if (amountPaid !== undefined) {
+    updateData.amountPaid = amountPaid;
+    updateData.paymentStatus = markRefunded
+      ? PaymentStatus.REFUNDED
+      : derivePaymentStatus(amountPaid, totalPrice);
+  } else if (markRefunded) {
+    updateData.paymentStatus = PaymentStatus.REFUNDED;
+  }
+
+  return prisma.booking.update({ where: { id }, data: updateData, include: bookingInclude });
 }
 
 // A user is considered to have "completed" a trip (and is therefore allowed
