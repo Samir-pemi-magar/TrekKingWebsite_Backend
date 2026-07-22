@@ -222,6 +222,24 @@ model Booking {
   updatedAt     DateTime      @updatedAt
 }
 
+// Tracks which client-generated checkout attempts have already been
+// processed, and what they resolved to. Deliberately separate from Booking
+// itself (rather than a column on it) because one attempt can now resolve
+// to EITHER a freshly created Booking OR an existing one that got more
+// travelers merged into it (see createBooking in booking.controller.ts) —
+// a column directly on Booking can't represent "this attempt's result was
+// a booking that already existed before this request came in."
+// A double-click, a retried request after a slow/failed response, or a
+// back-button resubmit all carry the same idempotencyKey, so the unique
+// constraint here is what actually prevents a second row (or a second
+// traveler-merge) from happening, not just client-side button-disabling.
+model BookingAttempt {
+  id             String   @id @default(uuid())
+  idempotencyKey String   @unique
+  bookingId      String
+  createdAt      DateTime @default(now())
+}
+
 enum BookingStatus {
   PENDING
   CONFIRMED

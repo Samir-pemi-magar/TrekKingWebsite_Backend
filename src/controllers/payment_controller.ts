@@ -118,7 +118,8 @@ export async function handleStripeWebhook(req: Request, res: Response) {
           const updated = await BookingModel.updateBooking(
             bookingId,
             { amountPaid: newAmountPaid, paymentMethod: PaymentMethod.STRIPE },
-            existing.totalPrice
+            existing.totalPrice,
+            existing.status
           );
 
           recordAuditLog({
@@ -137,6 +138,16 @@ export async function handleStripeWebhook(req: Request, res: Response) {
               "Payment received",
               templates.paymentReceived(contactName, updated.trip.name, paidNow, updated.paymentStatus)
             );
+            // Full payment auto-confirms a still-Pending booking (see
+            // BookingModel.updateBooking) — let the customer know their
+            // booking moved, not just that the payment landed.
+            if (updated.status !== existing.status) {
+              void sendMail(
+                contactEmail,
+                "Booking status update",
+                templates.bookingStatusUpdate(contactName, updated.trip.name, updated.status)
+              );
+            }
           }
         }
       } catch (err) {
@@ -244,7 +255,8 @@ export async function verifyEsewaPayment(req: Request, res: Response, next: Next
     const updated = await BookingModel.updateBooking(
       bookingId,
       { amountPaid: newAmountPaid, paymentMethod: PaymentMethod.ESEWA },
-      existing.totalPrice
+      existing.totalPrice,
+      existing.status
     );
 
     recordAuditLog({
@@ -268,6 +280,16 @@ export async function verifyEsewaPayment(req: Request, res: Response, next: Next
         "Payment received",
         templates.paymentReceived(contactName, updated.trip.name, paidNow, updated.paymentStatus)
       );
+      // Full payment auto-confirms a still-Pending booking (see
+      // BookingModel.updateBooking) — let the customer know their booking
+      // moved, not just that the payment landed.
+      if (updated.status !== existing.status) {
+        void sendMail(
+          contactEmail,
+          "Booking status update",
+          templates.bookingStatusUpdate(contactName, updated.trip.name, updated.status)
+        );
+      }
     }
 
     res.json({ status: "success", data: updated });
@@ -351,7 +373,8 @@ export async function verifyKhaltiPayment(req: Request, res: Response, next: Nex
     const updated = await BookingModel.updateBooking(
       bookingId,
       { amountPaid: newAmountPaid, paymentMethod: PaymentMethod.KHALTI },
-      existing.totalPrice
+      existing.totalPrice,
+      existing.status
     );
 
     recordAuditLog({
@@ -375,6 +398,16 @@ export async function verifyKhaltiPayment(req: Request, res: Response, next: Nex
         "Payment received",
         templates.paymentReceived(contactName, updated.trip.name, paidNow, updated.paymentStatus)
       );
+      // Full payment auto-confirms a still-Pending booking (see
+      // BookingModel.updateBooking) — let the customer know their booking
+      // moved, not just that the payment landed.
+      if (updated.status !== existing.status) {
+        void sendMail(
+          contactEmail,
+          "Booking status update",
+          templates.bookingStatusUpdate(contactName, updated.trip.name, updated.status)
+        );
+      }
     }
 
     res.json({ status: "success", data: updated });
@@ -484,7 +517,8 @@ export async function verifyFonepayPayment(req: Request, res: Response, next: Ne
     const updated = await BookingModel.updateBooking(
       bookingId,
       { amountPaid: newAmountPaid, paymentMethod: PaymentMethod.FONEPAY },
-      existing.totalPrice
+      existing.totalPrice,
+      existing.status
     );
 
     recordAuditLog({
@@ -508,6 +542,16 @@ export async function verifyFonepayPayment(req: Request, res: Response, next: Ne
         "Payment received",
         templates.paymentReceived(contactName, updated.trip.name, paidNow, updated.paymentStatus)
       );
+      // Full payment auto-confirms a still-Pending booking (see
+      // BookingModel.updateBooking) — let the customer know their booking
+      // moved, not just that the payment landed.
+      if (updated.status !== existing.status) {
+        void sendMail(
+          contactEmail,
+          "Booking status update",
+          templates.bookingStatusUpdate(contactName, updated.trip.name, updated.status)
+        );
+      }
     }
 
     res.json({ status: "success", data: updated });

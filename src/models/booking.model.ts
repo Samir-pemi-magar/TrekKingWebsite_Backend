@@ -2,7 +2,7 @@ import { Prisma, BookingStatus, PaymentStatus, PaymentMethod } from "@prisma/cli
 import { prisma } from "../config/prisma.js";
 
 const bookingInclude = {
-  trip: { select: { id: true, name: true, price: true, organizerId: true } },
+  trip: { select: { id: true, name: true, price: true, organizerId: true, coverImageUrl: true } },
   departure: { select: { id: true, startDate: true, endDate: true, guideId: true } },
   user: { select: { id: true, name: true, email: true, phone: true } },
 } satisfies Prisma.BookingInclude;
@@ -25,6 +25,50 @@ export function createBooking(data: BookingCreateInput) {
 
 export function getBookingById(id: string) {
   return prisma.booking.findUnique({ where: { id }, include: bookingInclude });
+}
+
+// ── Idempotency (BookingAttempt) ────────────────────────────────────────
+// See the BookingAttempt model comment in schema.prisma for why this is a
+// separate table instead of a column on Booking.
+
+export function findBookingAttempt(idempotencyKey: string) {
+  return prisma.bookingAttempt.findUnique({ where: { idempotencyKey } });
+}
+
+export function recordBookingAttempt(idempotencyKey: string, bookingId: string) {
+  return prisma.bookingAttempt.create({ data: { idempotencyKey, bookingId } });
+}
+
+// A logged-in customer's own existing booking for this exact departure, if
+// they already have one that isn't cancelled — the "same trip, same day/
+// month/year" match the controller merges new travelers into instead of
+// creating a look-alike duplicate row.
+export function findActiveBookingForUserDeparture(userId: string, departureId: string) {
+  return prisma.booking.findFirst({
+    where: { userId, departureId, status: { not: BookingStatus.CANCELLED } },
+    include: bookingInclude,
+  });
+}
+
+// Folds additional travelers into an existing booking rather than creating
+// a new one. Recomputes totalPrice for the new traveler count and re-derives
+// paymentStatus against the amount already paid — e.g. a booking that was
+// fully PAID can correctly drop back to PARTIAL once more (unpaid-for)
+// travelers are added to it, rather than staying stuck showing "Paid" for
+// money that no longer covers the whole party. Runs as a transaction so the
+// read-then-write can't race against a concurrent update to the same row.
+export function addTravelersToBooking(id: string, additionalTravelers: number, pricePerTraveler: number) {
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.booking.findUniqueOrThrow({ where: { id } });
+    const travelers = existing.travelers + additionalTravelers;
+    const totalPrice = pricePerTraveler * travelers;
+    const paymentStatus = derivePaymentStatus(existing.amountPaid, totalPrice);
+    return tx.booking.update({
+      where: { id },
+      data: { travelers, totalPrice, paymentStatus },
+      include: bookingInclude,
+    });
+  });
 }
 
 export function listMyBookings(userId: string) {
@@ -77,18 +121,41 @@ export function derivePaymentStatus(amountPaid: number, totalPrice: number): Pay
   return PaymentStatus.PARTIAL;
 }
 
-// totalPrice is threaded in by the caller (already has it from
-// getBookingById) rather than re-queried here, since it never changes
-// after booking creation.
-export function updateBooking(id: string, data: BookingUpdateInput, totalPrice: number) {
+// totalPrice and currentStatus are threaded in by the caller (already has
+// both from getBookingById) rather than re-queried here — totalPrice never
+// changes after booking creation, and currentStatus is needed below to
+// decide whether an auto-confirm applies.
+export function updateBooking(
+  id: string,
+  data: BookingUpdateInput,
+  totalPrice: number,
+  currentStatus?: BookingStatus,
+) {
   const { markRefunded, amountPaid, ...rest } = data;
   const updateData: Prisma.BookingUpdateInput = { ...rest };
 
   if (amountPaid !== undefined) {
     updateData.amountPaid = amountPaid;
-    updateData.paymentStatus = markRefunded
-      ? PaymentStatus.REFUNDED
-      : derivePaymentStatus(amountPaid, totalPrice);
+    const derived = derivePaymentStatus(amountPaid, totalPrice);
+    updateData.paymentStatus = markRefunded ? PaymentStatus.REFUNDED : derived;
+
+    // Auto-confirm: a booking that reaches full payment (online or
+    // manually recorded) while still sitting at PENDING moves itself to
+    // CONFIRMED, so a fully-paid booking never silently stalls forever
+    // behind a manual click nobody remembers to make. This only fires
+    // when nobody explicitly set `status` in this same call (an explicit
+    // human decision always wins) and only lifts PENDING -> CONFIRMED —
+    // it never touches a booking that's already further along
+    // (COMPLETED) or already CANCELLED, and never fires alongside a
+    // refund (a booking being refunded isn't being freshly confirmed).
+    if (
+      !markRefunded &&
+      derived === PaymentStatus.PAID &&
+      data.status === undefined &&
+      currentStatus === BookingStatus.PENDING
+    ) {
+      updateData.status = BookingStatus.CONFIRMED;
+    }
   } else if (markRefunded) {
     updateData.paymentStatus = PaymentStatus.REFUNDED;
   }
