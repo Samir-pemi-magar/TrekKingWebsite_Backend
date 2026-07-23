@@ -64,3 +64,23 @@ export function getUserWithAvatarPublicId(id: string) {
 export function listGuides() {
   return listUsers({ role: Role.GUIDE });
 }
+
+// ── Public guide directory ──────────────────────────────────────────────
+// Powers the marketing "Our Guides" page, which anyone can view whether
+// logged in or not. Deliberately a much narrower shape than publicUserSelect
+// above — no email, phone, isActive, or createdAt. Those are fine for an
+// internal admin/organizer list but shouldn't be handed to every visitor.
+const publicGuideSelect = {
+  id: true,
+  name: true,
+  avatarUrl: true,
+  bio: true,
+} satisfies Prisma.UserSelect;
+
+export function listPublicGuides() {
+  return prisma.user.findMany({
+    where: { deletedAt: null, isActive: true, role: Role.GUIDE },
+    select: publicGuideSelect,
+    orderBy: { createdAt: "desc" },
+  });
+}

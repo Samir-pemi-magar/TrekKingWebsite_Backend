@@ -28,6 +28,18 @@ export async function getUsers(req: Request, res: Response, next: NextFunction) 
   }
 }
 
+// Public — no auth required. Powers the marketing "Our Guides" page.
+// Returns a narrower shape than getUsers (see listPublicGuides/
+// publicGuideSelect) so visitors never see email/phone/account status.
+export async function getPublicGuides(_req: Request, res: Response, next: NextFunction) {
+  try {
+    const guides = await UserModel.listPublicGuides();
+    res.json({ status: "success", data: guides });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getUser(req: Request, res: Response, next: NextFunction) {
   try {
     const id = requireStringParam(req.params.id);

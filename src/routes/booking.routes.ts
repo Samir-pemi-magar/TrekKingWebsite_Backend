@@ -37,7 +37,23 @@ router.post("/payments/fonepay/verify", PaymentController.verifyFonepayPayment);
 router.get("/mine", requireAuth, BookingController.getMyBookings);
 router.get("/", requireAuth, organizerOrAdmin, BookingController.getAllBookings);
 router.get("/trip/:tripId", requireAuth, organizerOrAdmin, BookingController.getTripBookings);
+
+// "change-requests" before "/:id" for the same reason "mine" is — otherwise
+// it'd be parsed as a booking id lookup.
+//
+// Staff list of pending (default) or historical traveler-increase requests.
+router.get("/change-requests", requireAuth, organizerOrAdmin, BookingController.listChangeRequests);
+
 router.get("/:id", requireAuth, BookingController.getBooking);
+
+// Logged-in customer — ask to add travelers to a booking they already own.
+// Rate-limited same as creating a booking, since this is the other place a
+// repeated click/resubmit could otherwise pile up rows (the model layer
+// also refuses a second PENDING request per booking on top of this).
+router.post("/:id/change-request", bookingRateLimiter, requireAuth, BookingController.requestBookingChange);
+
+// Organizer/Admin — approve or decline a pending traveler-increase request.
+router.patch("/change-requests/:id", requireAuth, organizerOrAdmin, BookingController.reviewChangeRequest);
 
 // Public — works for both guests and logged-in users (see controller).
 router.post("/", bookingRateLimiter, optionalAuth, BookingController.createBooking);

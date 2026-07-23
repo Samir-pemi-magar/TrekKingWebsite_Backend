@@ -27,11 +27,61 @@ const aboutFeaturesField = z.preprocess((val) => {
   return val;
 }, z.array(featureSchema).max(6).optional());
 
+// Same multipart-stringify-then-parse reasoning as aboutFeaturesField above.
+function jsonArrayPreprocessor(val: unknown) {
+  if (Array.isArray(val)) return val;
+  if (typeof val === "string") {
+    try {
+      const parsed = JSON.parse(val);
+      if (Array.isArray(parsed)) return parsed;
+    } catch {
+      // Not JSON — fall through and let the array schema below reject it.
+    }
+  }
+  return val;
+}
+
+const statSchema = z.object({
+  value: z.string().min(1).max(20), // e.g. "15+", "2,400+", "100%"
+  label: z.string().min(1).max(100), // e.g. "Years operating in Nepal"
+});
+
+const homeStatsField = z.preprocess(jsonArrayPreprocessor, z.array(statSchema).max(8).optional());
+
+// Platform is free text (not an enum) — admin can label a link however they
+// like; the frontend matches known names (facebook/instagram/etc.) to a
+// branded icon and falls back to a generic link icon for anything else.
+const socialLinkSchema = z.object({
+  platform: z.string().min(1).max(40),
+  url: z.string().url().max(500),
+});
+
+const socialLinksField = z.preprocess(jsonArrayPreprocessor, z.array(socialLinkSchema).max(12).optional());
+
 const updateSchema = z.object({
+  siteName: z.string().min(1).max(80).optional(),
+
+  homeHeroEyebrow: z.string().max(200).optional(),
+  homeHeroTitle: z.string().max(200).optional(),
+  homeHeroSubtitle: z.string().max(500).optional(),
+  homeStats: homeStatsField,
+
   aboutIntro: z.string().max(2000).optional(),
   aboutBody: z.string().max(5000).optional(),
   aboutClosing: z.string().max(2000).optional(),
   aboutFeatures: aboutFeaturesField,
+
+  footerTagline: z.string().max(300).optional(),
+  footerPhone: z.string().max(30).optional(),
+  footerEmail: z.string().email().max(200).optional(),
+  footerAddress: z.string().max(300).optional(),
+
+  contactAddress: z.string().max(300).optional(),
+  contactPhone: z.string().max(30).optional(),
+  contactEmail: z.string().email().max(200).optional(),
+  contactResponseNote: z.string().max(500).optional(),
+
+  socialLinks: socialLinksField,
 });
 
 // Public — powers the About page and Homepage hero for every visitor.

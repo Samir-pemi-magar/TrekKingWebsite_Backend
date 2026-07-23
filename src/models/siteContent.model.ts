@@ -15,16 +15,35 @@ export function getSiteContent() {
 }
 
 export interface SiteContentUpdateInput {
+  siteName?: string;
+
   homeHeroImageUrl?: string;
   homeHeroPublicId?: string;
+  homeHeroEyebrow?: string;
+  homeHeroTitle?: string;
+  homeHeroSubtitle?: string;
+  // Prisma's generated Json field type won't accept a plain `unknown` —
+  // it needs Prisma.InputJsonValue instead.
+  homeStats?: Prisma.InputJsonValue;
+
   aboutHeroImageUrl?: string;
   aboutHeroPublicId?: string;
   aboutIntro?: string;
   aboutBody?: string;
   aboutClosing?: string;
-  // Prisma's generated Json field type won't accept a plain `unknown` —
-  // it needs Prisma.InputJsonValue instead.
   aboutFeatures?: Prisma.InputJsonValue;
+
+  footerTagline?: string;
+  footerPhone?: string;
+  footerEmail?: string;
+  footerAddress?: string;
+
+  contactAddress?: string;
+  contactPhone?: string;
+  contactEmail?: string;
+  contactResponseNote?: string;
+
+  socialLinks?: Prisma.InputJsonValue;
 }
 
 export function upsertSiteContent(data: SiteContentUpdateInput) {

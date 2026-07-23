@@ -10,6 +10,11 @@ const router = Router();
 router.patch("/me", requireAuth, UserController.updateMyProfile);
 router.patch("/me/avatar", requireAuth, uploadAvatar, UserController.updateMyAvatar);
 
+// Public — no auth. Powers the marketing "Our Guides" page. Deliberately a
+// different path than "/guides" below (which is auth-gated and returns a
+// wider admin/organizer shape), so there's no route collision either way.
+router.get("/guides/public", UserController.getPublicGuides);
+
 // Organizers/Admins need to browse Guides to assign them to departures.
 router.get("/guides", requireAuth, requireRole(Role.ORGANIZER, Role.ADMIN), (req, res, next) => {
   req.query.role = Role.GUIDE;

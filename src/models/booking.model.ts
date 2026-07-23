@@ -1,10 +1,19 @@
-import { Prisma, BookingStatus, PaymentStatus, PaymentMethod } from "@prisma/client";
+import { Prisma, BookingStatus, PaymentStatus, PaymentMethod, ChangeRequestStatus } from "@prisma/client";
 import { prisma } from "../config/prisma.js";
 
 const bookingInclude = {
   trip: { select: { id: true, name: true, price: true, organizerId: true, coverImageUrl: true } },
   departure: { select: { id: true, startDate: true, endDate: true, guideId: true } },
   user: { select: { id: true, name: true, email: true, phone: true } },
+  // Only the live (PENDING) request, if any — lets both the customer's
+  // account page and the staff dashboard show "change requested" without a
+  // second round-trip. A booking's approved/declined history isn't needed
+  // inline here; it's fetched separately if staff want the full log.
+  changeRequests: {
+    where: { status: ChangeRequestStatus.PENDING },
+    orderBy: { createdAt: "desc" as const },
+    take: 1,
+  },
 } satisfies Prisma.BookingInclude;
 
 export interface BookingCreateInput {
@@ -50,6 +59,24 @@ export function findActiveBookingForUserDeparture(userId: string, departureId: s
   });
 }
 
+// Same idea for a guest checkout — matched on email instead of a userId,
+// since guests have none. Used purely to stop a repeated "Book" click (or a
+// resubmitted form) from piling up look-alike rows; guests have no session
+// to later submit an authenticated change-request through, so this is only
+// ever surfaced back to them as "you already have a booking for this date",
+// never auto-merged and never turned into a BookingChangeRequest.
+export function findActiveBookingForGuestDeparture(guestEmail: string, departureId: string) {
+  return prisma.booking.findFirst({
+    where: {
+      guestEmail,
+      departureId,
+      userId: null,
+      status: { not: BookingStatus.CANCELLED },
+    },
+    include: bookingInclude,
+  });
+}
+
 // Folds additional travelers into an existing booking rather than creating
 // a new one. Recomputes totalPrice for the new traveler count and re-derives
 // paymentStatus against the amount already paid — e.g. a booking that was
@@ -68,6 +95,77 @@ export function addTravelersToBooking(id: string, additionalTravelers: number, p
       data: { travelers, totalPrice, paymentStatus },
       include: bookingInclude,
     });
+  });
+}
+
+// ── Change requests (traveler-count increases) ──────────────────────────
+// See the BookingChangeRequest model comment in schema.prisma for why this
+// is a request/review workflow instead of the old silent auto-merge.
+
+export function findPendingChangeRequestForBooking(bookingId: string) {
+  return prisma.bookingChangeRequest.findFirst({
+    where: { bookingId, status: ChangeRequestStatus.PENDING },
+  });
+}
+
+export interface ChangeRequestCreateInput {
+  bookingId: string;
+  requestedTravelers: number;
+  additionalTravelers: number;
+  note?: string;
+  requestedByUserId: string;
+}
+
+export function createChangeRequest(data: ChangeRequestCreateInput) {
+  return prisma.bookingChangeRequest.create({ data });
+}
+
+const changeRequestInclude = {
+  booking: { include: bookingInclude },
+} satisfies Prisma.BookingChangeRequestInclude;
+
+export function getChangeRequestById(id: string) {
+  return prisma.bookingChangeRequest.findUnique({
+    where: { id },
+    include: changeRequestInclude,
+  });
+}
+
+// Organizer (their trips only) or Admin (everything) — mirrors
+// listAllBookings' scoping. Defaults to PENDING since that's the only
+// thing a reviewer normally needs to act on; pass status: undefined to see
+// the full history instead.
+export function listChangeRequests(filters?: {
+  status?: ChangeRequestStatus | null;
+  organizerId?: string;
+}) {
+  return prisma.bookingChangeRequest.findMany({
+    where: {
+      ...(filters?.status ? { status: filters.status } : {}),
+      ...(filters?.organizerId
+        ? { booking: { trip: { organizerId: filters.organizerId } } }
+        : {}),
+    },
+    include: changeRequestInclude,
+    orderBy: { createdAt: "desc" },
+  });
+}
+
+export interface ChangeRequestReviewInput {
+  status: typeof ChangeRequestStatus.APPROVED | typeof ChangeRequestStatus.DECLINED;
+  reviewedByUserId: string;
+  reviewNote?: string;
+}
+
+export function reviewChangeRequest(id: string, data: ChangeRequestReviewInput) {
+  return prisma.bookingChangeRequest.update({
+    where: { id },
+    data: {
+      status: data.status,
+      reviewedByUserId: data.reviewedByUserId,
+      reviewedAt: new Date(),
+      reviewNote: data.reviewNote,
+    },
   });
 }
 

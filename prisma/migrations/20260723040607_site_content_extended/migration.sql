@@ -1,0 +1,15 @@
+-- AlterTable
+ALTER TABLE "SiteContent" ADD COLUMN     "contactAddress" TEXT,
+ADD COLUMN     "contactEmail" TEXT,
+ADD COLUMN     "contactPhone" TEXT,
+ADD COLUMN     "contactResponseNote" TEXT,
+ADD COLUMN     "footerAddress" TEXT,
+ADD COLUMN     "footerEmail" TEXT,
+ADD COLUMN     "footerPhone" TEXT,
+ADD COLUMN     "footerTagline" TEXT,
+ADD COLUMN     "homeHeroEyebrow" TEXT,
+ADD COLUMN     "homeHeroSubtitle" TEXT,
+ADD COLUMN     "homeHeroTitle" TEXT,
+ADD COLUMN     "homeStats" JSONB,
+ADD COLUMN     "siteName" TEXT,
+ADD COLUMN     "socialLinks" JSONB;

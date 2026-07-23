@@ -1,5 +1,5 @@
 import { NextFunction, Request, Response } from "express";
-import { BookingStatus, PaymentMethod, PaymentStatus, Prisma, Role } from "@prisma/client";
+import { BookingStatus, ChangeRequestStatus, PaymentMethod, PaymentStatus, Prisma, Role } from "@prisma/client";
 import { z } from "zod";
 import { ApiError } from "../utils/apiError.js";
 import { requireStringParam } from "../utils/params.js";
@@ -7,6 +7,7 @@ import * as BookingModel from "../models/booking.model.js";
 import * as TripModel from "../models/trip.model.js";
 import { sendMail, templates } from "../config/mailer.js";
 import { recordAuditLog } from "../utils/auditLog.js";
+import { env } from "../config/env.js";
 
 // Contact-info requirements differ for guests vs logged-in users, so that's
 // validated conditionally inside the handler rather than via .refine() here.
@@ -34,6 +35,20 @@ const statusUpdateSchema = z.object({
   // override, since a refund can't be inferred from the amount alone.
   markRefunded: z.boolean().optional(),
   notes: z.string().max(1000).optional(),
+});
+
+// Logged-in customers only (see requestBookingChange) — how many *more*
+// travelers they want added to a booking they already own. Capped at 50
+// like the original booking schema; the model layer separately re-checks
+// this against real seat availability at review time, not just here.
+const changeRequestSchema = z.object({
+  additionalTravelers: z.coerce.number().int().positive().max(50),
+  note: z.string().max(500).optional(),
+});
+
+const changeRequestReviewSchema = z.object({
+  decision: z.enum(["APPROVED", "DECLINED"]),
+  note: z.string().max(500).optional(),
 });
 
 async function assertCanManageTripBookings(req: Request, tripId: string) {
@@ -84,50 +99,54 @@ export async function createBooking(req: Request, res: Response, next: NextFunct
     }
 
     // Same trip + the exact same departure (day/month/year, since a
-    // departure IS a fixed date) + the same logged-in customer + they
-    // already have a non-cancelled booking for it: fold the extra
-    // travelers into that booking instead of creating a second
-    // near-identical row. This is what used to pile up as "10 bookings
-    // for one trip" clutter on the account page whenever someone hit
-    // "book again" for a trip they'd already booked.
+    // departure IS a fixed date) + the same customer already has a
+    // non-cancelled booking for it: don't create (or silently modify) a
+    // second row — just hand back the existing one untouched. This is what
+    // used to pile up as "10 bookings for one trip" clutter on the account
+    // page whenever someone hit "book again" for a trip they'd already
+    // booked, or clicked the button repeatedly.
     //
-    // Deliberately scoped to logged-in users with a fixed departureId only:
-    // - Guests have no reliable identity to match an existing booking
-    //   against, so every guest checkout still creates its own row.
-    // - Flexible/no-fixed-date trips (departureId absent) have no "same
-    //   date" to compare, so there's nothing to merge into.
-    // A cancelled booking is never merged into — if they cancelled and
+    // Changing the size of a booking that already exists is now always a
+    // deliberate, reviewed action (see requestBookingChange below) rather
+    // than something that happens as a side effect of resubmitting the
+    // booking form — so no travelers are added here, for logged-in users
+    // or guests alike. `alreadyBooked: true` lets the frontend show
+    // "You've already booked this date" and, for logged-in users, point
+    // them at "Request more travelers" instead of silently doing nothing.
+    //
+    // A cancelled booking is never matched against — if they cancelled and
     // want back in, that's genuinely a new booking, not "more of the same".
-    let booking;
-    let merged = false;
-    if (req.user && data.departureId) {
-      const existingActive = await BookingModel.findActiveBookingForUserDeparture(
-        req.user.userId,
-        data.departureId,
-      );
-      if (existingActive) {
-        booking = await BookingModel.addTravelersToBooking(
-          existingActive.id,
-          data.travelers,
-          trip.price,
+    let existingActive = null as Awaited<ReturnType<typeof BookingModel.findActiveBookingForUserDeparture>> | null;
+    if (data.departureId) {
+      if (req.user) {
+        existingActive = await BookingModel.findActiveBookingForUserDeparture(
+          req.user.userId,
+          data.departureId,
         );
-        merged = true;
+      } else if (data.guestEmail) {
+        existingActive = await BookingModel.findActiveBookingForGuestDeparture(
+          data.guestEmail,
+          data.departureId,
+        );
       }
     }
 
-    if (!booking) {
-      booking = await BookingModel.createBooking({
-        tripId: data.tripId,
-        departureId: data.departureId,
-        userId: req.user?.userId,
-        guestName: data.guestName,
-        guestEmail: data.guestEmail,
-        guestPhone: data.guestPhone,
-        travelers: data.travelers,
-        totalPrice: trip.price * data.travelers,
-        notes: data.notes,
-      });
+    if (existingActive) {
+      res.status(200).json({ status: "success", data: existingActive, alreadyBooked: true, merged: false });
+      return;
     }
+
+    const booking = await BookingModel.createBooking({
+      tripId: data.tripId,
+      departureId: data.departureId,
+      userId: req.user?.userId,
+      guestName: data.guestName,
+      guestEmail: data.guestEmail,
+      guestPhone: data.guestPhone,
+      travelers: data.travelers,
+      totalPrice: trip.price * data.travelers,
+      notes: data.notes,
+    });
 
     if (data.idempotencyKey) {
       try {
@@ -152,25 +171,21 @@ export async function createBooking(req: Request, res: Response, next: NextFunct
       }
     }
 
-    // Only send the "booking received" email for a genuinely fresh
-    // booking — merging into an existing one isn't a new booking, and a
-    // separate "we added N travelers" notification would need its own
-    // template rather than reusing this one.
-    if (!merged) {
-      const contactEmail = req.user?.email ?? data.guestEmail!;
-      const contactName = data.guestName ?? "there";
-      void sendMail(
-        contactEmail,
-        "Booking received",
-        templates.bookingReceived(contactName, trip.name, booking.status)
-      );
-    }
+    // Every booking that reaches this point is genuinely fresh (the
+    // duplicate/idempotency cases above all return earlier), so the
+    // "booking received" email always applies here.
+    const contactEmail = req.user?.email ?? data.guestEmail!;
+    const contactName = data.guestName ?? "there";
+    void sendMail(
+      contactEmail,
+      "Booking received",
+      templates.bookingReceived(contactName, trip.name, booking.status)
+    );
 
-    // `merged: true` tells the frontend this attempt added travelers to an
-    // existing booking rather than creating a new row — useful for showing
-    // a different confirmation message ("Added 2 travelers to your
-    // existing booking" vs "Booking created").
-    res.status(merged ? 200 : 201).json({ status: "success", data: booking, merged });
+    // `merged` is kept in the response shape (always false now) purely so
+    // older frontend code checking for it doesn't break; new code should
+    // key off `alreadyBooked` instead, set above when nothing was created.
+    res.status(201).json({ status: "success", data: booking, merged: false });
   } catch (err) {
     next(err);
   }
@@ -243,6 +258,22 @@ export async function updateBookingStatus(req: Request, res: Response, next: Nex
     if (data.amountPaid !== undefined && data.amountPaid > existing.totalPrice) {
       throw ApiError.badRequest(
         `amountPaid ($${data.amountPaid}) cannot exceed the booking's totalPrice ($${existing.totalPrice})`
+      );
+    }
+
+    // A drop in amountPaid means money is being taken back off the books —
+    // that's a refund or a correction, either way it shouldn't happen as a
+    // silent side effect of some other edit. This mirrors the CANCELLED
+    // guard below, but applies regardless of what `status` is being set to
+    // in the same request (a decrease on a CONFIRMED/COMPLETED booking is
+    // just as much a real refund as one on a CANCELLED booking).
+    if (
+      data.amountPaid !== undefined &&
+      data.amountPaid < existing.amountPaid &&
+      data.markRefunded !== true
+    ) {
+      throw ApiError.badRequest(
+        `Lowering amountPaid from $${existing.amountPaid} to $${data.amountPaid} needs markRefunded: true to confirm this is an intentional refund/correction`
       );
     }
 
@@ -336,6 +367,213 @@ export async function updateBookingStatus(req: Request, res: Response, next: Nex
     }
 
     res.json({ status: "success", data: updated });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ── Change requests (traveler-count increases) ──────────────────────────
+// Logged-in customers only — the account they booked under has to own the
+// booking. Guests have no session to authenticate this with, so they're
+// pointed at contacting support directly instead (see createBooking above).
+//
+// This deliberately never touches the booking itself. It only ever creates
+// a BookingChangeRequest row for an Organizer/Admin to act on via
+// reviewChangeRequest — no seats are held, no price changes, nothing is
+// emailed to the customer as a confirmation, because nothing has actually
+// changed yet.
+export async function requestBookingChange(req: Request, res: Response, next: NextFunction) {
+  try {
+    if (!req.user) throw ApiError.unauthorized();
+
+    const id = requireStringParam(req.params.id);
+    const data = changeRequestSchema.parse(req.body);
+
+    const booking = await BookingModel.getBookingById(id);
+    if (!booking) throw ApiError.notFound("Booking not found");
+    if (booking.userId !== req.user.userId) {
+      throw ApiError.forbidden("You can only request changes on your own bookings");
+    }
+    if (booking.status === BookingStatus.CANCELLED) {
+      throw ApiError.badRequest("This booking is cancelled — start a new booking instead");
+    }
+
+    // At most one open request per booking at a time. A customer who wants
+    // to change their mind about the number has to wait for the pending
+    // one to be reviewed (or, if it's still genuinely pending, this also
+    // stops a double-click/resubmit from creating a second identical row —
+    // the same "one attempt, one effect" idea idempotencyKey gives
+    // createBooking, just enforced here by a plain existence check instead,
+    // since a change request has no client-generated key of its own).
+    const existingPending = await BookingModel.findPendingChangeRequestForBooking(id);
+    if (existingPending) {
+      throw ApiError.badRequest(
+        "You already have a pending request for this booking — wait for it to be reviewed before submitting another"
+      );
+    }
+
+    // Advisory only: tells the customer up front if there's obviously not
+    // enough room, so they're not left waiting on a request that was
+    // always going to be declined. The real, authoritative check happens
+    // again in reviewChangeRequest at approval time, since seats can sell
+    // out in the meantime.
+    if (booking.departureId) {
+      const seatsRemaining = await TripModel.getDepartureSeatsRemaining(booking.departureId);
+      if (seatsRemaining !== null && seatsRemaining < data.additionalTravelers) {
+        throw ApiError.badRequest(`Only ${seatsRemaining} seat(s) remaining for this departure`);
+      }
+    }
+
+    const changeRequest = await BookingModel.createChangeRequest({
+      bookingId: id,
+      requestedTravelers: booking.travelers + data.additionalTravelers,
+      additionalTravelers: data.additionalTravelers,
+      note: data.note,
+      requestedByUserId: req.user.userId,
+    });
+
+    recordAuditLog({
+      actorId: req.user.userId,
+      action: "booking.changeRequest.created",
+      entityType: "Booking",
+      entityId: id,
+      meta: { additionalTravelers: data.additionalTravelers, changeRequestId: changeRequest.id },
+    });
+
+    // Best-effort notice to the admin inbox. Never blocks the response;
+    // sendMail failures shouldn't turn into a 500 for the customer over
+    // what's already a successfully-recorded request. (Routed to the admin
+    // inbox rather than the organizer directly, since this controller
+    // doesn't otherwise touch User/organizer contact details — staff can
+    // still see and act on it via listChangeRequests either way.)
+    const recipient = env.ADMIN_NOTIFICATION_EMAIL;
+    if (recipient) {
+      void sendMail(
+        recipient,
+        "Booking change request awaiting review",
+        `<p>${booking.user?.name ?? booking.guestName ?? "A customer"} requested +${data.additionalTravelers} traveler(s) on their booking for <strong>${booking.trip.name}</strong> (currently ${booking.travelers} → ${booking.travelers + data.additionalTravelers}).</p>` +
+          (data.note ? `<p>Note: ${data.note}</p>` : "") +
+          `<p>Review it from the Bookings panel.</p>`
+      );
+    }
+
+    res.status(201).json({ status: "success", data: changeRequest });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Organizer (their trips only) or Admin (everything) — mirrors
+// getAllBookings' scoping. Defaults to PENDING so the dashboard badge/count
+// only reflects things actually waiting on staff.
+export async function listChangeRequests(req: Request, res: Response, next: NextFunction) {
+  try {
+    const statusParam = req.query.status;
+    const status =
+      statusParam === "ALL"
+        ? null
+        : statusParam
+          ? z.nativeEnum(ChangeRequestStatus).parse(statusParam)
+          : ChangeRequestStatus.PENDING;
+    const organizerId = req.user!.role === Role.ADMIN ? undefined : req.user!.userId;
+    const requests = await BookingModel.listChangeRequests({ status, organizerId });
+    res.json({ status: "success", data: requests });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Organizer/Admin only. Approving actually applies the traveler increase
+// (reusing the same addTravelersToBooking used by the old auto-merge path,
+// now only ever invoked here, deliberately, after a human has looked at
+// it); declining just closes the request out with no effect on the
+// booking.
+export async function reviewChangeRequest(req: Request, res: Response, next: NextFunction) {
+  try {
+    const id = requireStringParam(req.params.id);
+    const { decision, note } = changeRequestReviewSchema.parse(req.body);
+
+    const changeRequest = await BookingModel.getChangeRequestById(id);
+    if (!changeRequest) throw ApiError.notFound("Change request not found");
+    if (changeRequest.status !== ChangeRequestStatus.PENDING) {
+      throw ApiError.badRequest("This request has already been reviewed");
+    }
+
+    const booking = changeRequest.booking;
+    await assertCanManageTripBookings(req, booking.tripId);
+
+    if (decision === "APPROVED") {
+      // Re-check seats now, not just at request time — availability can
+      // have moved in either direction while this sat waiting for review.
+      if (booking.departureId) {
+        const seatsRemaining = await TripModel.getDepartureSeatsRemaining(booking.departureId);
+        if (seatsRemaining !== null && seatsRemaining < changeRequest.additionalTravelers) {
+          throw ApiError.badRequest(
+            `Only ${seatsRemaining} seat(s) remaining for this departure now — can't approve +${changeRequest.additionalTravelers}`
+          );
+        }
+      }
+
+      const updatedBooking = await BookingModel.addTravelersToBooking(
+        booking.id,
+        changeRequest.additionalTravelers,
+        booking.trip.price,
+      );
+
+      const reviewed = await BookingModel.reviewChangeRequest(id, {
+        status: ChangeRequestStatus.APPROVED,
+        reviewedByUserId: req.user!.userId,
+        reviewNote: note,
+      });
+
+      recordAuditLog({
+        actorId: req.user?.userId,
+        action: "booking.changeRequest.approved",
+        entityType: "Booking",
+        entityId: booking.id,
+        meta: { additionalTravelers: changeRequest.additionalTravelers, changeRequestId: id },
+      });
+
+      const contactEmail = updatedBooking.user?.email ?? updatedBooking.guestEmail;
+      const contactName = updatedBooking.user?.name ?? updatedBooking.guestName ?? "there";
+      if (contactEmail) {
+        void sendMail(
+          contactEmail,
+          "Your booking change was approved",
+          `<p>Hi ${contactName},</p><p>Your request to add ${changeRequest.additionalTravelers} traveler(s) to your booking for <strong>${updatedBooking.trip.name}</strong> has been approved. Your booking is now for ${updatedBooking.travelers} traveler(s), totaling $${updatedBooking.totalPrice}.</p>`
+        );
+      }
+
+      res.json({ status: "success", data: { changeRequest: reviewed, booking: updatedBooking } });
+    } else {
+      const reviewed = await BookingModel.reviewChangeRequest(id, {
+        status: ChangeRequestStatus.DECLINED,
+        reviewedByUserId: req.user!.userId,
+        reviewNote: note,
+      });
+
+      recordAuditLog({
+        actorId: req.user?.userId,
+        action: "booking.changeRequest.declined",
+        entityType: "Booking",
+        entityId: booking.id,
+        meta: { additionalTravelers: changeRequest.additionalTravelers, changeRequestId: id },
+      });
+
+      const contactEmail = booking.user?.email ?? booking.guestEmail;
+      const contactName = booking.user?.name ?? booking.guestName ?? "there";
+      if (contactEmail) {
+        void sendMail(
+          contactEmail,
+          "Your booking change request was declined",
+          `<p>Hi ${contactName},</p><p>Your request to add ${changeRequest.additionalTravelers} traveler(s) to your booking for <strong>${booking.trip.name}</strong> wasn't approved.</p>` +
+            (note ? `<p>Note from our team: ${note}</p>` : "") +
+            `<p>Feel free to reach out if you have questions.</p>`
+        );
+      }
+
+      res.json({ status: "success", data: { changeRequest: reviewed, booking } });
+    }
   } catch (err) {
     next(err);
   }

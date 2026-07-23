@@ -220,6 +220,49 @@ model Booking {
 
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
+
+  changeRequests BookingChangeRequest[]
+}
+
+// A customer's request to add travelers to an EXISTING booking. Deliberately
+// NOT auto-applied — unlike creating a fresh booking, changing the size (and
+// therefore the price and seat count) of one that's already been made needs
+// an Organizer/Admin to look at seat availability and sign off, the same way
+// a status change does. One row per request; a booking can have many over
+// its lifetime (one per review cycle), but only ever one PENDING at a time
+// (enforced in the model layer, not the DB, since "at most one PENDING per
+// bookingId" isn't expressible as a plain unique constraint).
+model BookingChangeRequest {
+  id                  String              @id @default(uuid())
+  bookingId           String
+  booking             Booking             @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  // Snapshot of the ask: total travelers the customer wants after this
+  // request is approved (not just the delta), so approving it is a single
+  // unambiguous number even if the booking's own traveler count could in
+  // theory change between request and review.
+  requestedTravelers  Int
+  additionalTravelers Int
+  note                String?
+
+  status              ChangeRequestStatus @default(PENDING)
+
+  requestedByUserId   String?
+  reviewedByUserId    String?
+  reviewedAt          DateTime?
+  reviewNote          String?
+
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  @@index([bookingId])
+  @@index([status])
+}
+
+enum ChangeRequestStatus {
+  PENDING
+  APPROVED
+  DECLINED
 }
 
 // Tracks which client-generated checkout attempts have already been
@@ -389,9 +432,20 @@ enum Difficulty {
 model SiteContent {
   id                String   @id @default("singleton")
 
+  // Site-wide brand name — shown in Header/Footer in place of the hardcoded
+  // "Himalayan Paths". Null falls back to that same hardcoded default.
+  siteName          String?
+
   // Homepage hero
   homeHeroImageUrl  String?
   homeHeroPublicId  String?  // Cloudinary public_id, so we can delete the old image on replace
+  homeHeroEyebrow   String?  // small line above the headline, e.g. "Nepal's trusted..."
+  homeHeroTitle     String?  // main headline, e.g. "Where the mountains call"
+  homeHeroSubtitle  String?  // supporting paragraph under the headline
+
+  // Homepage stats strip — [{ value: string; label: string }]. Admin can
+  // add/remove cards, not just edit the default 4.
+  homeStats         Json?
 
   // About page hero
   aboutHeroImageUrl String?
@@ -403,6 +457,26 @@ model SiteContent {
   aboutBody         String?  // the paragraph(s) below it
   aboutFeatures     Json?    // [{ title: string; description: string }]
   aboutClosing      String?  // the closing "office in Thamel..." paragraph
+
+  // Footer contact block — falls back to the hardcoded Himalayan Paths
+  // defaults (phone/email/tagline) until an admin edits them.
+  footerTagline     String?
+  footerPhone       String?
+  footerEmail       String?
+  footerAddress     String?
+
+  // Contact page "Find us" block — deliberately separate from the footer
+  // fields above in case the office contact differs from the footer's.
+  contactAddress      String?
+  contactPhone        String?
+  contactEmail        String?
+  contactResponseNote String? // the "we reply within 24 hours..." blurb
+
+  // Social links — shared by Footer and the Contact page (single source of
+  // truth, edited from one place). [{ platform: string; url: string }].
+  // Admin can add or remove entries freely; not fixed Instagram/Facebook
+  // columns.
+  socialLinks       Json?
 
   updatedAt         DateTime @updatedAt
 }
