@@ -121,6 +121,7 @@ model Trip {
   bookings      Booking[]
   reviews       Review[]
   wishlistedBy  Wishlist[]
+  translations  TripTranslation[]
 
   organizerId String?
   organizer   User?      @relation("OrganizerTrips", fields: [organizerId], references: [id], onDelete: SetNull)
@@ -144,7 +145,71 @@ model ItineraryDay {
   altitudeM    Int?
   distanceKm   Float?
 
+  translations ItineraryDayTranslation[]
+
   @@unique([tripId, dayNumber])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// TRANSLATIONS (hybrid MT + organizer review)
+// ─────────────────────────────────────────────────────────────────────────
+// English lives on Trip/ItineraryDay themselves (unchanged) and is always
+// the fallback/source language. Every other locale is a row here.
+// `source` distinguishes "machine-translated, unreviewed" from "an
+// organizer/admin has reviewed/edited this" — REVIEWED rows are never
+// silently overwritten by a later auto-retranslate (see
+// generateTripTranslations in trip.model.ts). Locale is a plain string
+// (not an enum) so adding a supported language is a config change
+// (config/locales.ts), not a migration.
+model TripTranslation {
+  id          String            @id @default(uuid())
+  tripId      String
+  trip        Trip              @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  locale      String
+
+  name        String
+  description String
+  bestSeason  String?
+  highlights  String[]          @default([])
+  includes    String[]          @default([])
+  excludes    String[]          @default([])
+
+  source      TranslationSource @default(MACHINE)
+  reviewedAt  DateTime?
+  reviewedBy  String?
+
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@unique([tripId, locale])
+  @@index([tripId])
+}
+
+model ItineraryDayTranslation {
+  id             String            @id @default(uuid())
+  itineraryDayId String
+  itineraryDay   ItineraryDay      @relation(fields: [itineraryDayId], references: [id], onDelete: Cascade)
+  locale         String
+
+  title          String
+  description    String
+  meals          String?
+  accommodation  String?
+
+  source         TranslationSource @default(MACHINE)
+  reviewedAt     DateTime?
+  reviewedBy     String?
+
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  @@unique([itineraryDayId, locale])
+  @@index([itineraryDayId])
+}
+
+enum TranslationSource {
+  MACHINE  // auto-translated, not yet reviewed by a human
+  REVIEWED // an organizer/admin has edited or explicitly approved this draft
 }
 
 // A planned trip can run more than once. maxSeats + bookings' traveler counts
@@ -419,7 +484,9 @@ enum Region {
 
 enum Difficulty {
   EASY
+  EASY_MODERATE
   MODERATE
+  CHALLENGING
   STRENUOUS
 }
 

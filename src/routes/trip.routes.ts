@@ -44,4 +44,22 @@ router.patch(
   TripController.assignGuide
 );
 
+// Translations (hybrid MT + organizer review) — machine drafts are generated
+// automatically after create/update; these let an organizer/admin see and
+// edit/approve them per locale.
+router.get("/:id/translations", requireAuth, organizerOrAdmin, TripController.getTripTranslations);
+router.patch("/:id/translations/:locale", requireAuth, organizerOrAdmin, TripController.upsertTripTranslation);
+router.get(
+  "/:id/itinerary/:dayId/translations",
+  requireAuth,
+  organizerOrAdmin,
+  TripController.getItineraryDayTranslations
+);
+router.patch(
+  "/:id/itinerary/:dayId/translations/:locale",
+  requireAuth,
+  organizerOrAdmin,
+  TripController.upsertItineraryDayTranslation
+);
+
 export default router;

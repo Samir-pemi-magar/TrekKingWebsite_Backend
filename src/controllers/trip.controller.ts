@@ -7,6 +7,16 @@ import * as TripModel from "../models/trip.model.js";
 import * as UserModel from "../models/user.model.js";
 import { uploadBufferToCloudinary, uploadManyToCloudinary, deleteFromCloudinary } from "../utils/cloudinaryUpload.js";
 import { recordAuditLog } from "../utils/auditLog.js";
+import { isSupportedLocale } from "../config/locales.js";
+
+// Pulls a validated `?locale=` off the query string. Only ever returns a
+// value for locales we actually generate translations for — an unknown or
+// missing locale (including the implicit "en") returns undefined, which
+// downstream model functions treat as "just give me the English row".
+function parseLocale(req: Request): string | undefined {
+  const raw = req.query.locale;
+  return typeof raw === "string" && isSupportedLocale(raw) ? raw : undefined;
+}
 
 const tripQuerySchema = z.object({
   region: z.nativeEnum(Region).optional(),
@@ -77,6 +87,25 @@ const itineraryDaySchema = z.object({
 
 const guideAssignSchema = z.object({ guideId: z.string().uuid().nullable() });
 
+// Bodies for the translation-review endpoints — same shape as the source
+// fields, all optional since an organizer might only fix one field of a
+// machine draft.
+const tripTranslationBodySchema = z.object({
+  name: z.string().min(1).optional(),
+  description: z.string().min(1).optional(),
+  bestSeason: z.string().max(100).optional(),
+  highlights: stringArrayField,
+  includes: stringArrayField,
+  excludes: stringArrayField,
+});
+
+const itineraryDayTranslationBodySchema = z.object({
+  title: z.string().min(1).optional(),
+  description: z.string().min(1).optional(),
+  meals: z.string().max(120).optional(),
+  accommodation: z.string().max(120).optional(),
+});
+
 // Admins can touch anything; Organizers only their own trips.
 function assertCanModify(req: Request, trip: { organizerId: string | null }) {
   if (req.user?.role === Role.ADMIN) return;
@@ -90,7 +119,7 @@ function assertCanModify(req: Request, trip: { organizerId: string | null }) {
 export async function getTrips(req: Request, res: Response, next: NextFunction) {
   try {
     const filters = tripQuerySchema.parse(req.query);
-    const result = await TripModel.listTrips(filters);
+    const result = await TripModel.listTrips(filters, parseLocale(req));
     res.json({ status: "success", data: result });
   } catch (err) {
     next(err);
@@ -113,12 +142,12 @@ export async function getMyTrips(req: Request, res: Response, next: NextFunction
 export async function getTrip(req: Request, res: Response, next: NextFunction) {
   try {
     const id = requireStringParam(req.params.id);
-    const trip = await TripModel.getTripById(id);
+    const trip = await TripModel.getTripById(id, parseLocale(req));
     if (!trip) throw ApiError.notFound("Trip not found");
 
     // Attach seats-remaining per departure for the client's booking UI.
     const departuresWithSeats = await Promise.all(
-      trip.departures.map(async (d) => ({
+      trip.departures.map(async (d: any) => ({
         ...d,
         seatsRemaining: await TripModel.getDepartureSeatsRemaining(d.id),
       }))
@@ -153,6 +182,16 @@ export async function createTrip(req: Request, res: Response, next: NextFunction
     });
     recordAuditLog({ actorId: req.user?.userId, action: "trip.created", entityType: "Trip", entityId: trip.id });
     res.status(201).json({ status: "success", data: trip });
+
+    // Fire-and-forget: generates a MACHINE draft in every supported locale.
+    // Deliberately not awaited — translation calls are slow (one round-trip
+    // per field per locale) and their success/failure shouldn't hold up or
+    // fail the trip creation response. Errors are logged, not thrown; a
+    // failed locale just means that locale's trip page falls back to
+    // English until the next update or a manual retry.
+    TripModel.generateTripTranslations(trip.id, trip).catch((err) =>
+      console.error(`[translations] generation failed for trip ${trip.id}`, err)
+    );
   } catch (err) {
     next(err);
   }
@@ -178,6 +217,12 @@ export async function updateTrip(req: Request, res: Response, next: NextFunction
 
     const trip = await TripModel.updateTrip(id, { ...data, ...coverPatch });
     res.json({ status: "success", data: trip });
+
+    // Only re-translates locales that haven't been human-reviewed yet — see
+    // the reviewedLocales check inside generateTripTranslations.
+    TripModel.generateTripTranslations(trip.id, trip).catch((err) =>
+      console.error(`[translations] regeneration failed for trip ${trip.id}`, err)
+    );
   } catch (err) {
     next(err);
   }
@@ -301,6 +346,10 @@ export async function addItineraryDay(req: Request, res: Response, next: NextFun
     const data = itineraryDaySchema.parse(req.body);
     const day = await TripModel.addItineraryDay(id, data);
     res.status(201).json({ status: "success", data: day });
+
+    TripModel.generateItineraryDayTranslations(day.id, day).catch((err) =>
+      console.error(`[translations] generation failed for itinerary day ${day.id}`, err)
+    );
   } catch (err) {
     next(err);
   }
@@ -320,6 +369,10 @@ export async function updateItineraryDay(req: Request, res: Response, next: Next
     const data = itineraryDaySchema.partial().parse(req.body);
     const updated = await TripModel.updateItineraryDay(dayId, data);
     res.json({ status: "success", data: updated });
+
+    TripModel.generateItineraryDayTranslations(updated.id, updated).catch((err) =>
+      console.error(`[translations] regeneration failed for itinerary day ${updated.id}`, err)
+    );
   } catch (err) {
     next(err);
   }
@@ -429,6 +482,95 @@ export async function assignGuide(req: Request, res: Response, next: NextFunctio
       entityId: departureId,
       meta: { guideId },
     });
+    res.json({ status: "success", data: updated });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ── Translations — organizer/admin review workflow ──────────────────────
+// GET  /trips/:id/translations              → all locale drafts for a trip
+// PATCH /trips/:id/translations/:locale      → edit/approve one locale's draft
+// GET  /trips/:id/itinerary/:dayId/translations
+// PATCH /trips/:id/itinerary/:dayId/translations/:locale
+//
+// All four require the same organizerOrAdmin + assertCanModify ownership
+// check as the rest of the trip-editing endpoints, since translation drafts
+// are just another editable facet of the trip.
+
+export async function getTripTranslations(req: Request, res: Response, next: NextFunction) {
+  try {
+    const id = requireStringParam(req.params.id);
+    const trip = await TripModel.getTripById(id);
+    if (!trip) throw ApiError.notFound("Trip not found");
+    assertCanModify(req, trip);
+
+    const translations = await TripModel.getTripTranslations(id);
+    res.json({ status: "success", data: translations });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function upsertTripTranslation(req: Request, res: Response, next: NextFunction) {
+  try {
+    const id = requireStringParam(req.params.id);
+    const locale = requireStringParam(req.params.locale);
+    if (!isSupportedLocale(locale)) throw ApiError.badRequest(`Unsupported locale: ${locale}`);
+
+    const trip = await TripModel.getTripById(id);
+    if (!trip) throw ApiError.notFound("Trip not found");
+    assertCanModify(req, trip);
+
+    const data = tripTranslationBodySchema.parse(req.body);
+    const updated = await TripModel.upsertTripTranslation(id, locale, data, req.user!.userId);
+    recordAuditLog({
+      actorId: req.user?.userId,
+      action: "trip.translation_reviewed",
+      entityType: "Trip",
+      entityId: id,
+      meta: { locale },
+    });
+    res.json({ status: "success", data: updated });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getItineraryDayTranslations(req: Request, res: Response, next: NextFunction) {
+  try {
+    const tripId = requireStringParam(req.params.id);
+    const dayId = requireStringParam(req.params.dayId);
+    const trip = await TripModel.getTripById(tripId);
+    if (!trip) throw ApiError.notFound("Trip not found");
+    assertCanModify(req, trip);
+
+    const day = await TripModel.getItineraryDayById(dayId);
+    if (!day || day.tripId !== tripId) throw ApiError.notFound("Itinerary day not found");
+
+    const translations = await TripModel.getItineraryDayTranslations(dayId);
+    res.json({ status: "success", data: translations });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function upsertItineraryDayTranslation(req: Request, res: Response, next: NextFunction) {
+  try {
+    const tripId = requireStringParam(req.params.id);
+    const dayId = requireStringParam(req.params.dayId);
+    const locale = requireStringParam(req.params.locale);
+    if (!isSupportedLocale(locale)) throw ApiError.badRequest(`Unsupported locale: ${locale}`);
+
+    const trip = await TripModel.getTripById(tripId);
+    if (!trip) throw ApiError.notFound("Trip not found");
+    assertCanModify(req, trip);
+
+    const day = await TripModel.getItineraryDayById(dayId);
+    if (!day || day.tripId !== tripId) throw ApiError.notFound("Itinerary day not found");
+
+    const data = itineraryDayTranslationBodySchema.parse(req.body);
+    const updated = await TripModel.upsertItineraryDayTranslation(dayId, locale, data, req.user!.userId);
     res.json({ status: "success", data: updated });
   } catch (err) {
     next(err);

@@ -89,7 +89,7 @@ export async function createBooking(req: Request, res: Response, next: NextFunct
     if (!trip) throw ApiError.badRequest("Referenced trip does not exist");
 
     if (data.departureId) {
-      const departure = trip.departures.find((d) => d.id === data.departureId);
+      const departure = trip.departures.find((d: any) => d.id === data.departureId);
       if (!departure) throw ApiError.badRequest("Referenced departure does not exist for this trip");
 
       const seatsRemaining = await TripModel.getDepartureSeatsRemaining(data.departureId);
