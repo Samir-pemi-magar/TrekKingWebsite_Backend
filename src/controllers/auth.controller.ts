@@ -1,7 +1,7 @@
 import { NextFunction, Request, Response } from "express";
 import bcrypt from "bcrypt";
 import { z } from "zod";
-import type { Role } from "@prisma/client";
+import type { Role, User } from "@prisma/client";
 import { ApiError } from "../utils/apiError.js";
 import {
   signAccessToken,
@@ -9,6 +9,10 @@ import {
   hashRefreshToken,
   generatePasswordResetToken,
   hashPasswordResetToken,
+  generateEmailVerificationToken,
+  hashEmailVerificationToken,
+  generateOAuthLoginCode,
+  hashOAuthLoginCode,
 } from "../utils/jwt.js";
 import {
   createUser,
@@ -22,6 +26,13 @@ import {
   findPasswordResetTokenByHash,
   markPasswordResetTokenUsed,
   updateUserPassword,
+  storeEmailVerificationToken,
+  findEmailVerificationTokenByHash,
+  markEmailVerificationTokenUsed,
+  markUserEmailVerified,
+  storeOAuthLoginCode,
+  findOAuthLoginCodeByHash,
+  markOAuthLoginCodeUsed,
 } from "../models/auth.model.js";
 import { sendMail, templates } from "../config/mailer.js";
 import { env } from "../config/env.js";
@@ -43,6 +54,12 @@ const resetPasswordSchema = z.object({
   newPassword: z.string().min(8, "Password must be at least 8 characters"),
 });
 
+const verifyEmailSchema = z.object({ token: z.string().min(1) });
+
+const resendVerificationSchema = z.object({ email: z.string().email() });
+
+const googleExchangeSchema = z.object({ code: z.string().min(1) });
+
 function publicUser(user: { id: string; email: string; name: string | null; role: string }) {
   return { id: user.id, email: user.email, name: user.name, role: user.role };
 }
@@ -54,10 +71,22 @@ async function issueTokenPair(user: { id: string; email: string; role: Role }) {
   return { accessToken, refreshToken: raw };
 }
 
+async function sendVerificationEmail(user: { id: string; email: string; name: string | null }) {
+  const { raw, hash, expiresAt } = generateEmailVerificationToken();
+  await storeEmailVerificationToken(user.id, hash, expiresAt);
+  const verifyLink = `${env.FRONTEND_URL}/verify-email?token=${raw}`;
+  void sendMail(user.email, "Verify your email", templates.verifyEmail(user.name ?? "there", verifyLink));
+}
+
 // Public signup — always creates a plain USER account. This is for customers
 // who want to book trips / save wishlists / leave reviews later; it is NOT
 // how Organizers, Guides, or Admins get created (that only happens via an
 // existing Admin, see user.controller.ts).
+//
+// Hard email-verification gate: this does NOT log the user in or return
+// tokens. It creates the account (unverified), fires off a verification
+// email, and the frontend shows a "check your email" screen. The account
+// can't be used to log in until POST /auth/verify-email succeeds.
 export async function register(req: Request, res: Response, next: NextFunction) {
   try {
     const { email, password, name } = credentialsSchema.parse(req.body);
@@ -67,9 +96,15 @@ export async function register(req: Request, res: Response, next: NextFunction) 
 
     const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
     const user = await createUser(email, passwordHash, name);
-    const tokens = await issueTokenPair(user);
+    await sendVerificationEmail(user);
 
-    res.status(201).json({ status: "success", data: { ...tokens, user: publicUser(user) } });
+    res.status(201).json({
+      status: "success",
+      data: {
+        message: "Account created. Check your email to verify your address before logging in.",
+        email: user.email,
+      },
+    });
   } catch (err) {
     next(err);
   }
@@ -80,11 +115,125 @@ export async function login(req: Request, res: Response, next: NextFunction) {
     const { email, password } = credentialsSchema.pick({ email: true, password: true }).parse(req.body);
 
     const user = await findUserByEmail(email);
-    if (!user || !user.passwordHash) throw ApiError.unauthorized("Invalid email or password");
+    if (!user || !user.passwordHash) {
+      // Covers both "no such user" and "this account only has a Google
+      // login" (passwordHash is null for Google-only accounts) — same
+      // generic message either way so login can't be used to fingerprint
+      // which emails exist or how they signed up.
+      throw ApiError.unauthorized("Invalid email or password");
+    }
     if (user.deletedAt || !user.isActive) throw ApiError.unauthorized("This account is no longer active");
 
     const valid = await bcrypt.compare(password, user.passwordHash);
     if (!valid) throw ApiError.unauthorized("Invalid email or password");
+
+    // Hard gate — block login entirely until the address is confirmed.
+    if (!user.emailVerifiedAt) {
+      throw ApiError.forbidden(
+        "Please verify your email before logging in. Check your inbox for the verification link, or request a new one.",
+      );
+    }
+
+    const tokens = await issueTokenPair(user);
+    res.json({ status: "success", data: { ...tokens, user: publicUser(user) } });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Consumes a verification token from the emailed link. On success we log
+// the user in immediately (issue a token pair) rather than making them
+// re-enter their password right after proving they own the account —
+// otherwise the hard gate would cost them an extra manual login step.
+export async function verifyEmail(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { token } = verifyEmailSchema.parse(req.body);
+    const tokenHash = hashEmailVerificationToken(token);
+
+    const stored = await findEmailVerificationTokenByHash(tokenHash);
+    if (!stored || stored.usedAt || stored.expiresAt < new Date()) {
+      throw ApiError.badRequest("This verification link is invalid or has expired");
+    }
+
+    const user = await findUserById(stored.userId);
+    if (!user || user.deletedAt || !user.isActive) {
+      throw ApiError.badRequest("This verification link is invalid or has expired");
+    }
+
+    if (!user.emailVerifiedAt) {
+      await markUserEmailVerified(user.id);
+    }
+    await markEmailVerificationTokenUsed(tokenHash);
+
+    const tokens = await issueTokenPair(user);
+    res.json({
+      status: "success",
+      data: { ...tokens, user: publicUser(user) },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Re-sends the verification email. Always returns 204, even if the email
+// isn't registered or is already verified — same "don't leak which emails
+// exist" reasoning as forgotPassword below.
+export async function resendVerification(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { email } = resendVerificationSchema.parse(req.body);
+    const user = await findUserByEmail(email);
+
+    if (user && !user.deletedAt && user.isActive && !user.emailVerifiedAt) {
+      await sendVerificationEmail(user);
+    }
+
+    res.status(204).send();
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ── Google OAuth ──────────────────────────────────────────────────────
+// GET /auth/google/callback — runs after passport's GoogleStrategy has
+// already found-or-created req.user (see config/passport.ts). We don't hand
+// tokens back in the redirect URL (they'd land in browser history and
+// server logs); instead we mint a one-time code and send the SPA to fetch
+// the real tokens via POST /auth/google/exchange.
+export async function googleCallback(req: Request, res: Response, next: NextFunction) {
+  try {
+    // req.user is JwtPayload everywhere requireAuth/optionalAuth run (see
+    // auth.middleware.ts's global Request.user augmentation), but on THIS
+    // route it's whatever passport's GoogleStrategy `done(null, user)`
+    // called with — the raw Prisma User (see config/passport.ts). The two
+    // never overlap on the same request, so the cast is safe here.
+    const user = req.user as unknown as User | undefined;
+    if (!user) throw ApiError.unauthorized("Google sign-in failed");
+
+    const { raw, hash, expiresAt } = generateOAuthLoginCode();
+    await storeOAuthLoginCode(user.id, hash, expiresAt);
+
+    res.redirect(`${env.FRONTEND_URL}/auth/google/callback?code=${raw}`);
+  } catch (err) {
+    next(err);
+  }
+}
+
+// POST /auth/google/exchange — the SPA calls this immediately after landing
+// on /auth/google/callback?code=... to trade the short-lived code for a
+// real access/refresh token pair.
+export async function googleExchange(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { code } = googleExchangeSchema.parse(req.body);
+    const codeHash = hashOAuthLoginCode(code);
+
+    const stored = await findOAuthLoginCodeByHash(codeHash);
+    if (!stored || stored.usedAt || stored.expiresAt < new Date()) {
+      throw ApiError.unauthorized("This sign-in link is invalid or has expired. Please try again.");
+    }
+    await markOAuthLoginCodeUsed(codeHash);
+
+    const user = await findUserById(stored.userId);
+    if (!user || user.deletedAt || !user.isActive) throw ApiError.unauthorized();
 
     const tokens = await issueTokenPair(user);
     res.json({ status: "success", data: { ...tokens, user: publicUser(user) } });
@@ -151,6 +300,8 @@ export async function me(req: Request, res: Response, next: NextFunction) {
         nationality: user.nationality,
         avatarUrl: user.avatarUrl,
         role: user.role,
+        isEmailVerified: !!user.emailVerifiedAt,
+        hasPassword: !!user.passwordHash,
       },
     });
   } catch (err) {

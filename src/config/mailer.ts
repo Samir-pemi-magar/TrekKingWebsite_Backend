@@ -53,4 +53,10 @@ export const templates = {
     <p><a href="${resetLink}">Reset your password</a></p>
     <p>This link expires in 30 minutes. If you didn't request this, you can safely ignore this email.</p>
   `,
+  verifyEmail: (name: string, verifyLink: string) => `
+    <p>Hi ${name},</p>
+    <p>Thanks for signing up! Please confirm your email address to activate your account:</p>
+    <p><a href="${verifyLink}">Verify your email</a></p>
+    <p>This link expires in 24 hours. If you didn't create this account, you can safely ignore this email.</p>
+  `,
 };

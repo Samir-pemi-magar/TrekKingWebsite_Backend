@@ -19,20 +19,22 @@ datasource db {
 // - ADMIN: full control — all trips, all users, all posts/bookings, can
 //   promote/demote roles.
 model User {
-  id           String    @id @default(uuid())
-  email        String    @unique
-  passwordHash String?
-  name         String?
-  phone        String?
-  bio          String?
-  nationality  String?
-  avatarUrl    String?
-  avatarPublicId String?
-  role         Role      @default(USER)
-  isActive     Boolean   @default(true) // soft-disable instead of hard delete
-  deletedAt    DateTime? // soft delete marker
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  id              String    @id @default(uuid())
+  email           String    @unique
+  passwordHash    String?
+  googleId        String?   @unique
+  emailVerifiedAt DateTime? // null = not verified yet
+  name            String?
+  phone           String?
+  bio             String?
+  nationality     String?
+  avatarUrl       String?
+  avatarPublicId  String?
+  role            Role      @default(USER)
+  isActive        Boolean   @default(true) // soft-disable instead of hard delete
+  deletedAt       DateTime? // soft delete marker
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   trips            Trip[]          @relation("OrganizerTrips")
   posts             Post[]          @relation("AuthoredPosts")
@@ -43,7 +45,9 @@ model User {
   refreshTokens     RefreshToken[]
   auditLogs         AuditLog[]      @relation("ActorLogs")
 
-  passwordResetTokens PasswordResetToken[]
+  passwordResetTokens     PasswordResetToken[]
+  emailVerificationTokens EmailVerificationToken[]
+  oauthLoginCodes         OAuthLoginCode[]
 }
 
 model PasswordResetToken {
@@ -51,6 +55,38 @@ model PasswordResetToken {
   userId    String
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+// Same pattern as PasswordResetToken — opaque token, hashed at rest,
+// single-use, short expiry (issued as 24h in jwt.ts).
+model EmailVerificationToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+// Bridges the server-driven Google OAuth redirect back to the SPA. The
+// /auth/google/callback handler can't hand back a refresh token directly —
+// it would end up in the URL bar, browser history, and server access logs.
+// Instead it mints one of these (very short-lived, single-use) and redirects
+// with just the opaque code; the frontend immediately exchanges it for a
+// real token pair via POST /auth/google/exchange.
+model OAuthLoginCode {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  codeHash  String    @unique
   expiresAt DateTime
   usedAt    DateTime?
   createdAt DateTime  @default(now())
