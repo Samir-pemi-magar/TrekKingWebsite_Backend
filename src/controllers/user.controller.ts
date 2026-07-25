@@ -1,11 +1,15 @@
 import { NextFunction, Request, Response } from "express";
+import bcrypt from "bcrypt";
 import { Role } from "@prisma/client";
 import { z } from "zod";
 import { ApiError } from "../utils/apiError.js";
 import { requireStringParam } from "../utils/params.js";
 import * as UserModel from "../models/user.model.js";
+import { findUserByEmail } from "../models/auth.model.js";
 import { uploadBufferToCloudinary, deleteFromCloudinary } from "../utils/cloudinaryUpload.js";
 import { recordAuditLog } from "../utils/auditLog.js";
+
+const SALT_ROUNDS = 12;
 
 const roleUpdateSchema = z.object({ role: z.nativeEnum(Role) });
 const activeUpdateSchema = z.object({ isActive: z.boolean() });
@@ -14,6 +18,12 @@ const profileUpdateSchema = z.object({
   phone: z.string().min(5).max(20).optional(),
   bio: z.string().max(1000).optional(),
   nationality: z.string().max(60).optional(),
+});
+const adminCreateUserSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(8, "Password must be at least 8 characters"),
+  name: z.string().min(1).optional(),
+  role: z.nativeEnum(Role),
 });
 
 // Admin-only. Optional ?role= filter (e.g. ?role=GUIDE to populate a
@@ -51,9 +61,39 @@ export async function getUser(req: Request, res: Response, next: NextFunction) {
   }
 }
 
-// Admin-only. This is the ONLY way someone becomes an Organizer, Guide, or
-// Admin — e.g. a customer registers as USER, then the Head Admin promotes
-// them to ORGANIZER or GUIDE once approved.
+// Admin-only. Directly creates an account with any role (ORGANIZER, GUIDE,
+// or another ADMIN — USER is allowed too, e.g. for a walk-in customer).
+// Distinct from public /auth/register, which always creates a plain USER
+// and gates login behind email verification; here the admin is vouching
+// for the address, so the account is created pre-verified and can log in
+// immediately with the password given.
+export async function adminCreateUser(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { email, password, name, role } = adminCreateUserSchema.parse(req.body);
+
+    const existing = await findUserByEmail(email);
+    if (existing) throw ApiError.conflict("An account with this email already exists");
+
+    const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
+    const created = await UserModel.createUserByAdmin(email, passwordHash, role, name);
+
+    recordAuditLog({
+      actorId: req.user?.userId,
+      action: "user.created_by_admin",
+      entityType: "User",
+      entityId: created.id,
+      meta: { role },
+    });
+
+    res.status(201).json({ status: "success", data: created });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Admin-only. This is the ONLY OTHER way someone becomes an Organizer,
+// Guide, or Admin after signup — e.g. a customer registers as USER, then
+// the Head Admin promotes them to ORGANIZER or GUIDE once approved.
 export async function updateUserRole(req: Request, res: Response, next: NextFunction) {
   try {
     const id = requireStringParam(req.params.id);
@@ -120,6 +160,32 @@ export async function updateMyProfile(req: Request, res: Response, next: NextFun
     if (!req.user) throw ApiError.unauthorized();
     const data = profileUpdateSchema.parse(req.body);
     const updated = await UserModel.updateOwnProfile(req.user.userId, data);
+    res.json({ status: "success", data: updated });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// POST /users/me/request-deletion — starts the 7-day grace period. The
+// account stays fully usable (and the user stays logged in) until either
+// the period elapses (see scripts/finalizeAccountDeletions.ts) or they
+// cancel via /users/me/cancel-deletion below.
+export async function requestMyAccountDeletion(req: Request, res: Response, next: NextFunction) {
+  try {
+    if (!req.user) throw ApiError.unauthorized();
+    const updated = await UserModel.requestAccountDeletion(req.user.userId);
+    res.json({ status: "success", data: updated });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// POST /users/me/cancel-deletion — the "Undo" action. No-ops harmlessly if
+// there was nothing pending.
+export async function cancelMyAccountDeletion(req: Request, res: Response, next: NextFunction) {
+  try {
+    if (!req.user) throw ApiError.unauthorized();
+    const updated = await UserModel.cancelAccountDeletion(req.user.userId);
     res.json({ status: "success", data: updated });
   } catch (err) {
     next(err);

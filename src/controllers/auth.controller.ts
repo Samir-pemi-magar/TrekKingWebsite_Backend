@@ -302,6 +302,11 @@ export async function me(req: Request, res: Response, next: NextFunction) {
         role: user.role,
         isEmailVerified: !!user.emailVerifiedAt,
         hasPassword: !!user.passwordHash,
+        // Non-null while a self-requested deletion's 7-day grace period is
+        // running (see user.model.ts requestAccountDeletion). Lets the
+        // frontend show a "your account will be deleted on X — Undo" banner.
+        deletionRequestedAt: user.deletionRequestedAt,
+        scheduledDeletionAt: user.scheduledDeletionAt,
       },
     });
   } catch (err) {

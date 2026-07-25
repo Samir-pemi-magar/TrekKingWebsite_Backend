@@ -32,9 +32,21 @@ model User {
   avatarPublicId  String?
   role            Role      @default(USER)
   isActive        Boolean   @default(true) // soft-disable instead of hard delete
-  deletedAt       DateTime? // soft delete marker
+  deletedAt       DateTime? // soft delete marker (final — set by admin delete or once a self-requested deletion's grace period elapses)
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
+
+  // ── Self-service delayed account deletion ──────────────────────────────
+  // A user can request their own account be deleted; rather than deleting
+  // immediately, we give them a 7-day grace period to change their mind.
+  // deletionRequestedAt is just a record of when they asked. scheduledDeletionAt
+  // is deletionRequestedAt + 7 days — a background job (finalizeDueAccountDeletions
+  // in user.model.ts) sweeps for rows where this has passed and finalizes
+  // them into the normal deletedAt soft-delete. Cancelling (undo) just nulls
+  // both fields out; the account never leaves isActive/deletedAt=null state
+  // during the grace period, so nothing else in the app needs to change.
+  deletionRequestedAt DateTime?
+  scheduledDeletionAt DateTime?
 
   trips            Trip[]          @relation("OrganizerTrips")
   posts             Post[]          @relation("AuthoredPosts")
@@ -48,6 +60,8 @@ model User {
   passwordResetTokens     PasswordResetToken[]
   emailVerificationTokens EmailVerificationToken[]
   oauthLoginCodes         OAuthLoginCode[]
+
+  @@index([scheduledDeletionAt])
 }
 
 model PasswordResetToken {
@@ -553,6 +567,14 @@ model SiteContent {
   // About page hero
   aboutHeroImageUrl String?
   aboutHeroPublicId String?
+
+  // Auth pages — separate images for Login vs Signup (see AdminPage's
+  // "Site" panel). Optional: each page falls back to its own hardcoded
+  // default image until an admin uploads one here.
+  authLoginImageUrl  String?
+  authLoginPublicId  String?  // Cloudinary public_id, so we can delete the old image on replace
+  authSignupImageUrl String?
+  authSignupPublicId String?
 
   // About page copy — all optional so the page falls back to its current
   // hardcoded defaults until an admin first edits them.

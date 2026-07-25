@@ -12,6 +12,8 @@ const publicUserSelect = {
   role: true,
   isActive: true,
   createdAt: true,
+  deletionRequestedAt: true,
+  scheduledDeletionAt: true,
 } satisfies Prisma.UserSelect;
 
 export function listUsers(filters?: { role?: Role }) {
@@ -53,6 +55,76 @@ export function updateOwnProfile(id: string, data: ProfileUpdateInput) {
 
 export function updateAvatar(id: string, avatarUrl: string, avatarPublicId: string) {
   return prisma.user.update({ where: { id }, data: { avatarUrl, avatarPublicId }, select: publicUserSelect });
+}
+
+const DELETION_GRACE_PERIOD_MS = 7 * 24 * 60 * 60 * 1000;
+
+// Starts (or restarts) the 7-day grace period. The account stays fully
+// active/usable in the meantime — deletedAt is NOT touched here — so the
+// user can keep using and log back into their account right up until the
+// scheduled moment, and undo at any time via cancelAccountDeletion below.
+export function requestAccountDeletion(id: string) {
+  const now = new Date();
+  return prisma.user.update({
+    where: { id },
+    data: {
+      deletionRequestedAt: now,
+      scheduledDeletionAt: new Date(now.getTime() + DELETION_GRACE_PERIOD_MS),
+    },
+    select: publicUserSelect,
+  });
+}
+
+// Undo — clears the pending request. Safe to call even if there's nothing
+// pending (just no-ops the fields back to null).
+export function cancelAccountDeletion(id: string) {
+  return prisma.user.update({
+    where: { id },
+    data: { deletionRequestedAt: null, scheduledDeletionAt: null },
+    select: publicUserSelect,
+  });
+}
+
+// Sweep target for a scheduled job (see scripts/finalizeAccountDeletions.ts).
+// Finalizes any account whose grace period has elapsed and was never
+// cancelled, using the exact same soft-delete shape as an admin-initiated
+// delete (deletedAt + isActive=false) — so every existing `deletedAt: null`
+// filter across the app (listUsers, getUserById, login, etc.) already
+// excludes these once finalized, with no other code needing to change.
+// Also revokes any live sessions, since the account is gone as far as the
+// rest of the app is concerned.
+export async function finalizeDueAccountDeletions(): Promise<number> {
+  const due = await prisma.user.findMany({
+    where: { deletedAt: null, scheduledDeletionAt: { not: null, lte: new Date() } },
+    select: { id: true },
+  });
+
+  for (const { id } of due) {
+    await prisma.$transaction([
+      prisma.user.update({ where: { id }, data: { deletedAt: new Date(), isActive: false } }),
+      prisma.refreshToken.updateMany({ where: { userId: id, revokedAt: null }, data: { revokedAt: new Date() } }),
+    ]);
+  }
+
+  return due.length;
+}
+
+// ── Admin-created accounts ─────────────────────────────────────────────
+// The ONLY way to create an ORGANIZER, GUIDE, or (a second) ADMIN account
+// directly — public /auth/register always creates a plain USER (see
+// auth.controller.ts). emailVerifiedAt is set immediately: an admin is
+// vouching for this address by creating the account, so there's no separate
+// "check your inbox" step the way self-registration has.
+export function createUserByAdmin(
+  email: string,
+  passwordHash: string,
+  role: Role,
+  name?: string,
+) {
+  return prisma.user.create({
+    data: { email, passwordHash, role, name, emailVerifiedAt: new Date() },
+    select: publicUserSelect,
+  });
 }
 
 export function getUserWithAvatarPublicId(id: string) {

@@ -33,6 +33,11 @@ export interface SiteContentUpdateInput {
   aboutClosing?: string;
   aboutFeatures?: Prisma.InputJsonValue;
 
+  authLoginImageUrl?: string;
+  authLoginPublicId?: string;
+  authSignupImageUrl?: string;
+  authSignupPublicId?: string;
+
   footerTagline?: string;
   footerPhone?: string;
   footerEmail?: string;

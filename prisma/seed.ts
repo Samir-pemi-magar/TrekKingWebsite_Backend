@@ -14,7 +14,12 @@ async function seedUser(email: string | undefined, password: string | undefined,
   if (existing) return existing;
 
   const passwordHash = await bcrypt.hash(password, 12);
-  const user = await prisma.user.create({ data: { email, passwordHash, name, role } });
+  // emailVerifiedAt is set immediately — these accounts are created directly
+  // by us (not via public signup), so there's no address to confirm. Without
+  // this, login() 's hard email-verification gate blocks every seeded user.
+  const user = await prisma.user.create({
+    data: { email, passwordHash, name, role, emailVerifiedAt: new Date() },
+  });
   console.log(`Seeded ${role.toLowerCase()}: ${email} (change this password after first login)`);
   return user;
 }

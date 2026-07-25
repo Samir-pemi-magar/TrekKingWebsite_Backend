@@ -96,14 +96,22 @@ export async function getSiteContent(_req: Request, res: Response, next: NextFun
 
 // Admin-only (see requireRole(Role.ADMIN) on the route). Multipart: any
 // subset of the text fields above, plus optional homeHeroImage /
-// aboutHeroImage files (see upload.middleware.ts -> uploadSiteContentImages).
-// Only fields actually sent are changed — a partial update, same as
+// aboutHeroImage / authLoginImage / authSignupImage files (see
+// upload.middleware.ts -> uploadSiteContentImages — that multer config
+// needs a matching .fields([...]) entry for authLoginImage/authSignupImage
+// or these will silently be dropped by multer before req.files ever sees
+// them). Only fields actually sent are changed — a partial update, same as
 // PATCH /trips/:id.
 export async function updateSiteContent(req: Request, res: Response, next: NextFunction) {
   try {
     const data = updateSchema.parse(req.body);
     const files = req.files as
-      | { homeHeroImage?: Express.Multer.File[]; aboutHeroImage?: Express.Multer.File[] }
+      | {
+          homeHeroImage?: Express.Multer.File[];
+          aboutHeroImage?: Express.Multer.File[];
+          authLoginImage?: Express.Multer.File[];
+          authSignupImage?: Express.Multer.File[];
+        }
       | undefined;
 
     const existing = await SiteContentModel.getSiteContent();
@@ -127,6 +135,26 @@ export async function updateSiteContent(req: Request, res: Response, next: NextF
       }
       updates.aboutHeroImageUrl = uploaded.url;
       updates.aboutHeroPublicId = uploaded.publicId;
+    }
+
+    const authLoginFile = files?.authLoginImage?.[0];
+    if (authLoginFile) {
+      const uploaded = await uploadBufferToCloudinary(authLoginFile.buffer, "site/auth-login", "image");
+      if (existing.authLoginPublicId) {
+        await deleteFromCloudinary(existing.authLoginPublicId, "image");
+      }
+      updates.authLoginImageUrl = uploaded.url;
+      updates.authLoginPublicId = uploaded.publicId;
+    }
+
+    const authSignupFile = files?.authSignupImage?.[0];
+    if (authSignupFile) {
+      const uploaded = await uploadBufferToCloudinary(authSignupFile.buffer, "site/auth-signup", "image");
+      if (existing.authSignupPublicId) {
+        await deleteFromCloudinary(existing.authSignupPublicId, "image");
+      }
+      updates.authSignupImageUrl = uploaded.url;
+      updates.authSignupPublicId = uploaded.publicId;
     }
 
     const updated = await SiteContentModel.upsertSiteContent(updates);

@@ -9,6 +9,8 @@ const router = Router();
 // Self-service — must come before /:id routes so "me" isn't parsed as an id.
 router.patch("/me", requireAuth, UserController.updateMyProfile);
 router.patch("/me/avatar", requireAuth, uploadAvatar, UserController.updateMyAvatar);
+router.post("/me/request-deletion", requireAuth, UserController.requestMyAccountDeletion);
+router.post("/me/cancel-deletion", requireAuth, UserController.cancelMyAccountDeletion);
 
 // Public — no auth. Powers the marketing "Our Guides" page. Deliberately a
 // different path than "/guides" below (which is auth-gated and returns a
@@ -22,6 +24,7 @@ router.get("/guides", requireAuth, requireRole(Role.ORGANIZER, Role.ADMIN), (req
 });
 
 // Admin-only user management
+router.post("/", requireAuth, requireRole(Role.ADMIN), UserController.adminCreateUser);
 router.get("/", requireAuth, requireRole(Role.ADMIN), UserController.getUsers);
 router.get("/:id", requireAuth, requireRole(Role.ADMIN), UserController.getUser);
 router.patch("/:id/role", requireAuth, requireRole(Role.ADMIN), UserController.updateUserRole);
