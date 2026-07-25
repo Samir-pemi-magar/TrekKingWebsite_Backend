@@ -1,10 +1,10 @@
-import { Prisma, Difficulty, Region, TripType, TranslationSource } from "@prisma/client";
+import { Prisma, Difficulty, TripType, TranslationSource } from "@prisma/client";
 import { prisma } from "../config/prisma.js";
 import { SUPPORTED_LOCALES } from "../config/locales.js";
 import { translateFields } from "../utils/translate.js";
 
 export interface TripFilters {
-  region?: Region;
+  region?: string;
   difficulty?: Difficulty;
   type?: TripType;
   minPrice?: number;
@@ -66,13 +66,30 @@ function applyItineraryDayTranslation<T extends { id: string; meals?: string | n
   };
 }
 
+// Every distinct region currently in use across non-deleted trips. Since
+// Trip.region is free text (any admin/organizer can type a new one when
+// creating a trip), this is how the UI offers "regions that already exist"
+// as suggestions/filter options instead of a fixed list.
+export async function listDistinctRegions(): Promise<string[]> {
+  const rows = await prisma.trip.findMany({
+    where: { deletedAt: null },
+    distinct: ["region"],
+    select: { region: true },
+    orderBy: { region: "asc" },
+  });
+  return rows.map((r) => r.region);
+}
+
 export async function listTrips(filters: TripFilters, locale?: string) {
   const page = filters.page ?? 1;
   const pageSize = filters.pageSize ?? 20;
 
   const where: Prisma.TripWhereInput = {
     deletedAt: null,
-    ...(filters.region ? { region: filters.region } : {}),
+    // Case-insensitive exact match — region is free text now, so "Himalaya"
+    // and "himalaya" should filter the same rather than needing an exact
+    // case match.
+    ...(filters.region ? { region: { equals: filters.region, mode: "insensitive" } } : {}),
     ...(filters.difficulty ? { difficulty: filters.difficulty } : {}),
     ...(filters.type ? { type: filters.type } : {}),
     ...(filters.organizerId ? { organizerId: filters.organizerId } : {}),
@@ -155,7 +172,7 @@ export async function getTripById(id: string, locale?: string) {
 
 export interface TripCreateInput {
   name: string;
-  region: Region;
+  region: string;
   location?: string;
   duration: number;
   difficulty: Difficulty;

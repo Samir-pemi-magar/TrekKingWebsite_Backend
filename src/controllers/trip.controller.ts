@@ -1,5 +1,5 @@
 import { NextFunction, Request, Response } from "express";
-import { Difficulty, Region, Role, TripType } from "@prisma/client";
+import { Difficulty, Role, TripType } from "@prisma/client";
 import { z } from "zod";
 import { ApiError } from "../utils/apiError.js";
 import { requireStringParam } from "../utils/params.js";
@@ -19,7 +19,9 @@ function parseLocale(req: Request): string | undefined {
 }
 
 const tripQuerySchema = z.object({
-  region: z.nativeEnum(Region).optional(),
+  // Free text now (Trip.region is no longer a Prisma enum) — trimmed so a
+  // stray space doesn't silently fail to match any trips.
+  region: z.string().trim().min(1).max(60).optional(),
   difficulty: z.nativeEnum(Difficulty).optional(),
   type: z.nativeEnum(TripType).optional(),
   minPrice: z.coerce.number().nonnegative().optional(),
@@ -53,7 +55,9 @@ const stringArrayField = z.preprocess((val) => {
 
 const tripBodySchema = z.object({
   name: z.string().min(1),
-  region: z.nativeEnum(Region),
+  // Free text — admin/organizer can type any region name; no longer
+  // restricted to a fixed enum (see schema.prisma).
+  region: z.string().trim().min(1).max(60),
   location: z.string().min(1).optional(),
   duration: z.coerce.number().int().positive(),
   difficulty: z.nativeEnum(Difficulty),
@@ -121,6 +125,20 @@ export async function getTrips(req: Request, res: Response, next: NextFunction) 
     const filters = tripQuerySchema.parse(req.query);
     const result = await TripModel.listTrips(filters, parseLocale(req));
     res.json({ status: "success", data: result });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Public — every distinct region currently in use, for the region filter
+// dropdown and the trip form's region suggestions. Trip.region is free
+// text now (see schema.prisma), so there's no fixed enum to read options
+// from. Mounted at GET /trips/regions, ABOVE the /trips/:id route (see
+// trip.routes.ts) so "regions" is never parsed as a trip id.
+export async function getRegions(_req: Request, res: Response, next: NextFunction) {
+  try {
+    const regions = await TripModel.listDistinctRegions();
+    res.json({ status: "success", data: regions });
   } catch (err) {
     next(err);
   }

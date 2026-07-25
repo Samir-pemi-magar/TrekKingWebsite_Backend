@@ -141,7 +141,12 @@ model RefreshToken {
 model Trip {
   id            String     @id @default(uuid())
   name          String
-  region        Region
+  // Free text (not an enum) so an Admin/Organizer can add a new region
+  // just by typing it when creating a trip — no migration needed. Was
+  // `Region` (the enum below) until region management moved to
+  // admin-editable free text; the `Region` enum is kept only because
+  // Inquiry.regionInterest still uses it.
+  region        String
   location      String?
   duration      Int
   difficulty    Difficulty
@@ -526,6 +531,8 @@ model AuditLog {
   @@index([entityType, entityId])
 }
 
+// Only used by Inquiry.regionInterest now — Trip.region moved to free-text
+// String above so admins/organizers can add new regions without a migration.
 enum Region {
   HIMALAYA
   HILLS

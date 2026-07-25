@@ -16,6 +16,8 @@ const organizerOrAdmin = requireRole(Role.ORGANIZER, Role.ADMIN);
 router.get("/mine", requireAuth, organizerOrAdmin, TripController.getMyTrips);
 
 router.get("/", TripController.getTrips);
+// Must be registered before "/:id" or "regions" would be parsed as a trip id.
+router.get("/regions", TripController.getRegions);
 router.get("/:id", TripController.getTrip);
 
 router.post("/", requireAuth, organizerOrAdmin, uploadTripCover, TripController.createTrip);
